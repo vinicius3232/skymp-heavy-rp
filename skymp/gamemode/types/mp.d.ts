@@ -76,7 +76,41 @@ interface MakePropertyOptions {
  * navegável, não verificação.
  */
 interface ClientCtx {
-  /** API do Skyrim Platform (`ctx.sp.Game`, `ctx.sp.on`, ...). */
+  /**
+   * API do Skyrim Platform (`ctx.sp.Game`, `ctx.sp.on`, ...).
+   *
+   * Continua `any` de propósito: o conteúdo de uma string de snippet não é
+   * checado pelo TypeScript, então tipar isto não verificaria nada — o valor
+   * está em registrar a procedência do que se usa lá dentro.
+   *
+   * O que este gamemode usa hoje, e de onde veio cada coisa:
+   *
+   *   [DOC]  `ctx.sp.browser.setVisible / setFocused / executeJavaScript`
+   *          — ponte para a CEF. Em produção desde a Fase 0
+   *          (phase0-basic.js), é o caminho de `browserModal`, `panelData` e
+   *          `voipTicket`.
+   *   [DOC]  `ctx.sp.on(nomeDoEvento, cb)` — assinatura de evento do cliente.
+   *          Lista completa em `docs/skyrim_platform/new_events.md` upstream.
+   *          Usado com `'hit'` em core/hit-events.js.
+   *   [DOC]  `ctx.sp.on('update', cb)` — *"Called once for every frame in the
+   *          game (60 times per second at 60 FPS) after you've loaded a save
+   *          or started a new game."* Mesma fonte. É o relógio da nametag.
+   *   [DOC]  `ctx.sp.worldPointToScreenPoint(...pontos: number[][]): number[][]`
+   *          — *"convert an array of points in the game world to an array of
+   *          points on the user's screen. The dot on the screen is indicated by
+   *          3 numbers from -1 to 1."*
+   *          Fonte: `docs/skyrim_platform/new_methods.md` upstream; assinatura
+   *          das tipagens oficiais (`skyrim-platform/skyrim-platform`,
+   *          `index.d.ts`).
+   *
+   *          ⚠️ **Documentada, nunca chamada por este projeto.** A
+   *          convenção dos eixos e o comportamento para um ponto atrás da
+   *          câmera não estão na documentação e não foram observados. Ver
+   *          `nametag-service.js` §4 antes de confiar nisto.
+   *   [USO]  `ctx.sp.Game.getFormEx(id)` + `ctx.sp.ObjectReference.from(form)`
+   *          — obter uma referência a partir de um FormID de cliente.
+   *          Inferido do idioma do Skyrim Platform; **não observado aqui**.
+   */
   sp: any;
   /** Em `updateOwner`, equivale a `ctx.sp.Game.getPlayer()`. Em `makeProperty`, undefined. */
   refr: any;

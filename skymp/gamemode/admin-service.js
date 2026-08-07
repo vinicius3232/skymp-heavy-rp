@@ -8,6 +8,7 @@
  */
 const db = require('./database');
 const commands = require('./commands');
+const identity = require('./identity-service');
 const moderationLog = require('./core/moderation-log');
 const { actorRef } = require('./core/papyrus');
 
@@ -21,10 +22,36 @@ const { actorRef } = require('./core/papyrus');
 // errada sobre quem pode reformar a economia de crafting — que é a mesma classe
 // do nível numérico que esta tabela já pagou caro para eliminar: uma permissão
 // que significa outra coisa que não o que o nome diz.
+//
+// `reveal_identity` (07/08/2026) nasce pelo mesmo critério e contra o mesmo
+// candidato fácil. O óbvio seria pendurar a revelação de identidade em
+// `view_audit` — "staff lendo registro" —, e é errado por duas razões
+// independentes: `view_audit` significa ler o que a STAFF fez, não furar o
+// anonimato de um JOGADOR, então quem auditasse "quem pode view_audit?"
+// receberia a resposta errada sobre quem pode desmascarar; e `view_audit` é de
+// moderador, então reaproveitá-la alargaria o poder para a linha de frente
+// inteira sem que ninguém tivesse decidido isso.
+//
+// Fica em `admin`/`owner`, fora do moderador, pelo mesmo andar de `add_item`,
+// `set_gold` e `retire_character`. O argumento não é o de patrimônio da §7.4 —
+// revelar não move nada. É que **nenhuma outra ação de staff é irreversível do
+// jeito que esta é**: um kick acaba quando a pessoa reconecta, ouro dado volta
+// por outro `/setgold`, e até o `/permakill` é soft-delete. Uma identidade
+// revelada não desrevela — ela passa a morar na cabeça de quem leu, e o
+// `audit_logs` registra que aconteceu sem poder desfazer. O valor do sistema de
+// anonimato é inversamente proporcional a quantas pessoas conseguem contorná-lo,
+// e moderador é o cargo mais numeroso e menos filtrado.
+//
+// O que fica em aberto, no formato da PARKED_SERVICES_DECISION.md §7.4: se a
+// operação real mostrar que denúncia de metagaming chega mais rápido do que
+// admin responde, a resposta NÃO é dar `reveal_identity` ao moderador — é
+// desenhar uma variante com escopo (revelar só quem é parte de uma denúncia
+// aberta). Alargar o cargo resolveria a fila criando o problema que a permissão
+// existe para evitar.
 const ROLE_PERMISSIONS = {
   moderator: ['kick', 'teleport', 'view_audit', 'manage_whitelist'],
-  admin:     ['kick', 'teleport', 'view_audit', 'manage_whitelist', 'ban', 'add_item', 'set_gold', 'retire_character', 'manage_recipes'],
-  owner:     ['kick', 'teleport', 'view_audit', 'manage_whitelist', 'ban', 'add_item', 'set_gold', 'manage_staff', 'retire_character', 'manage_recipes']
+  admin:     ['kick', 'teleport', 'view_audit', 'manage_whitelist', 'ban', 'add_item', 'set_gold', 'retire_character', 'manage_recipes', 'reveal_identity'],
+  owner:     ['kick', 'teleport', 'view_audit', 'manage_whitelist', 'ban', 'add_item', 'set_gold', 'manage_staff', 'retire_character', 'manage_recipes', 'reveal_identity']
 };
 
 // Cache em memória: actorId → { role, permissions: Set<string> }
@@ -401,6 +428,107 @@ async function retireCharacter(actorId, targetActorId, reason) {
 }
 
 /**
+ * /revelaridentidade [actorId] - Revela à staff o nome real de um personagem.
+ * Permissão: 'reveal_identity' (admin+, ver ROLE_PERMISSIONS no topo).
+ *
+ * ─── Por que é um comando, e não "staff sempre vê o nome real" ──────────────
+ *
+ * O `NAMETAG_IDENTITY_SYSTEM.md` listava a regra 2 como *"Staff futura: nome
+ * real, com permissao auditada"*, e a leitura passiva dessa frase — um terceiro
+ * ramo dentro de `getDisplayName()` que devolve o nome real quando o observador
+ * é staff — é o desenho errado por quatro motivos, em ordem de peso:
+ *
+ * 1. **Estado não se audita, só o uso dele.** A própria regra pede "auditada".
+ *    Um ramo passivo não tem evento: ninguém consegue responder *quem* furou o
+ *    anonimato de *quem* e *quando*, que é exatamente a pergunta de uma
+ *    arbitragem contestada. Um comando tem ator, alvo e carimbo de tempo.
+ *
+ * 2. **Acoplaria a autoridade sobre o nome ao cache de staff.**
+ *    `getDisplayName(observador, alvo)` trabalha com PERSONAGENS; o cargo de
+ *    staff vive em `staffCache`, chaveado por `actorId`. Um ramo lá dentro
+ *    obrigaria o `identity-service` a importar o `admin-service` e a receber um
+ *    actorId que ele hoje não precisa — e o efeito apareceria, invisível, em
+ *    todos os chamadores de uma vez: chat local, aba Social do painel, e a
+ *    nametag da Tarefa 2. É a forma de defeito que a
+ *    `PARKED_SERVICES_DECISION.md` §7.1 usou para apagar o `disguise-service`,
+ *    aplicada por dentro em vez de por fora.
+ *
+ * 3. **A staff também joga.** Nome real passivo em todo lugar estraga
+ *    permanentemente a cena do personagem de quem é staff — custo contínuo,
+ *    pago por todo mundo o tempo todo, para atender um caso raro.
+ *
+ * 4. **Revelar é raro por desenho.** Se virar rotina, o problema é outro.
+ *
+ * O preço da escolha, dito por inteiro: investigar custa um comando por pessoa,
+ * e a staff precisa do `actorId` em mãos. É atrito real e é aceito — desmascarar
+ * deve doer um pouco.
+ *
+ * ─── O que este comando deliberadamente NÃO faz ─────────────────────────────
+ *
+ * **Não escreve em `character_known_identities`.** Aquela tabela é conhecimento
+ * IC — o que o PERSONAGEM sabe. Uma revelação de staff é OOC, feita pela pessoa
+ * que administra, e gravá-la ali faria o personagem da staff passar a chamar o
+ * alvo pelo nome real no chat local para sempre, sem que ninguém tivesse
+ * apresentado nada a ninguém. Isso transformaria a ferramenta de investigação
+ * numa máquina de metagaming com rastro de aparência legítima. A revelação é
+ * pontual: uma notificação privada, uma linha de auditoria, e acabou.
+ *
+ * **Não mexe em `getDisplayName()`.** A escada de exibição continua com os
+ * degraus que tinha (você mesmo / conhecido / `Desconhecido`), e continua sendo
+ * o caminho padrão de todo mundo — inclusive da staff. Isso importa para além
+ * desta rodada: a §7.1 já decidiu que o disfarce, quando voltar, entra como
+ * **degrau** naquela função. Um ramo de staff enfiado lá dentro agora obrigaria
+ * quem construir o disfarce a negociar com ele.
+ *
+ * ─── O bug que o `/revealid` antigo tinha, e que este teste cobre ───────────
+ *
+ * O `disguise-service.staffReveal` (apagado em 06/08/2026) montava a mensagem
+ * com `commands.getActiveCharacterData(actorId)` — a PRÓPRIA STAFF — usando o
+ * `targetActorId` só para achar o disfarce. O comando respondia *"X é na
+ * verdade <nome de quem digitou>"*. Aqui todo dado da resposta e da auditoria
+ * sai de `targetChar`; o `actorId` só serve para autorizar, auditar e receber a
+ * notificação. Há teste de mutação para isso.
+ */
+async function revealIdentity(actorId, targetActorId) {
+  if (!hasPermission(actorId, 'reveal_identity')) {
+    sendDenied(actorId);
+    return;
+  }
+
+  const targetChar = commands.getActiveCharacterData(targetActorId);
+  if (!targetChar) {
+    commands.sendNotification(actorId, '[Staff] Alvo nao encontrado ou personagem nao carregado.');
+    return;
+  }
+
+  const staffChar = commands.getActiveCharacterData(actorId);
+
+  // O nome real vem do identity-service, que continua sendo a única autoridade
+  // sobre o que é o nome de um personagem. Este arquivo decide QUEM pode ver;
+  // ele decide O QUE se vê. Concatenar first/last aqui criaria uma segunda
+  // resposta para a mesma pergunta, que é a §7.1 de novo.
+  const realName = identity.getCharacterFullName(targetChar);
+
+  // A auditoria vem ANTES da notificação de propósito: se o banco cair, o certo
+  // é a staff não receber o nome, e não receber o nome sem rastro. É a mesma
+  // ordem que `auditIdentityEvent` já não garante sozinha (ela engole o erro e
+  // cai para o console), mas a intenção fica declarada aqui e o teste de
+  // mutação reprova quem inverter.
+  await identity.auditIdentityEvent(
+    staffChar?.accountId,
+    targetChar.accountId,
+    'identity:staff_reveal',
+    `role=${getRole(actorId)} targetCharacterId=${targetChar.characterId} targetActorId=0x${targetActorId.toString(16)}`
+  );
+
+  commands.sendNotification(
+    actorId,
+    `[Staff] 0x${targetActorId.toString(16)} e ${realName} (personagem ${targetChar.characterId}). Revelacao registrada.`
+  );
+  console.log(`[admin] ${actorId.toString(16)} (${getRole(actorId)}) revelou identidade de ${targetActorId.toString(16)} (char ${targetChar.characterId})`);
+}
+
+/**
  * Nome legivel para o log de moderacao.
  *
  * O `actorId` em hexadecimal vai junto de proposito: e o que a staff digita nos
@@ -429,5 +557,6 @@ module.exports = {
   teleportTo,
   kickPlayer,
   setGold,
-  retireCharacter
+  retireCharacter,
+  revealIdentity
 };

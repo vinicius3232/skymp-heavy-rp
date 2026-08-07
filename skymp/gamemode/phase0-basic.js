@@ -55,6 +55,7 @@ const playerPanel   = require(path.join(gamemodeDir, 'player-panel-service'));
 const deathService  = require(path.join(gamemodeDir, 'death-service'));
 const voipService   = require(path.join(gamemodeDir, 'voip-service'));
 const soulService   = require(path.join(gamemodeDir, 'soul-service'));
+const nametagService = require(path.join(gamemodeDir, 'nametag-service'));
 
 console.log("[phase0] SkyMP Heavy RP gamemode loaded");
 
@@ -170,6 +171,29 @@ moduleRegistry.register({
   commands: voipService.commandDefs(),
   initialize: async () => {
     voipService.startVoipServer();
+  }
+});
+
+// LAB: Nametag visual — PROVA DE CONCEITO, uma etiqueta (o mais próximo).
+//
+// ⚠️ Nunca apareceu na tela de ninguém. A projeção mundo→tela usa
+// `worldPointToScreenPoint`, que é documentada pelo SkyMP mas que este projeto
+// nunca chamou; a convenção dos eixos e o caso "alvo atrás da câmera" só uma
+// sessão real resolve. Ler o cabeçalho de `nametag-service.js` §4 antes de
+// tratar isto como pronto — a distância entre "o código calcula o nome certo" e
+// "duas pessoas veem nomes diferentes na tela" é a mesma que separa
+// hit-events/espm/safe-zones de validado.
+moduleRegistry.register({
+  id: 'nametag',
+  enabledBy: 'ENABLE_NAMETAG_SERVICE',
+  phase: 'lab',
+  dependencies: [],
+  commands: [],
+  initialize: async () => {
+    nametagService.initNametagService();
+  },
+  shutdown: async () => {
+    nametagService.shutdownNametagService();
   }
 });
 
@@ -294,6 +318,18 @@ if (typeof mp !== "undefined") {
         ctx.sp.browser.executeJavaScript('window.handleVoipTicket && window.handleVoipTicket(' + payload + ')');
       }
     `,
+    updateNeighbor: ''
+  });
+
+  // Nametag: alvo + nome já resolvido pelo servidor. Diferente das quatro
+  // properties acima, o snippet daqui não só repassa para a CEF — ele registra
+  // um laço no evento `update` do jogo, porque a POSIÇÃO na tela é a única coisa
+  // desta feature que o servidor não tem como saber. O texto continua vindo
+  // pronto: o cliente nunca escolhe nome. Ver nametag-service.js §1 e §2.
+  mp.makeProperty(nametagService.PROPERTY, {
+    isVisibleByOwner: true,
+    isVisibleByNeighbors: false,
+    updateOwner: nametagService.SNIPPET_DO_CLIENTE,
     updateNeighbor: ''
   });
 

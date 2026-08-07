@@ -57,6 +57,36 @@
       transition: width 0.4s;
     }
 
+    /* === NAMETAG (POC) ===
+       Ancorada no mundo, não na tela: `left`/`top` vêm de uma projeção
+       mundo→tela feita no cliente e chegam em porcentagem da viewport
+       (ver nametag-service.js). Todo o resto do HUD deste arquivo é
+       `position: fixed` com canto fixo — esta é a primeira coisa aqui que
+       segue um ator.
+
+       `transition` de 60ms é o que cobre o intervalo entre atualizações: o
+       cliente escreve no máximo 20x/s, e sem a interpolação a etiqueta andaria
+       aos saltos. Só `left`/`top` são interpolados — animar `opacity` junto
+       faria o aparecer/sumir arrastar. */
+    #nametag {
+      position: fixed;
+      display: none;
+      transform: translate(-50%, -100%);
+      transition: left 60ms linear, top 60ms linear;
+      padding: 3px 10px;
+      border-radius: 12px;
+      background: rgba(0,0,0,0.6);
+      border: 1px solid rgba(187,161,107,0.35);
+      color: #e8e0cf;
+      font-size: 13px;
+      letter-spacing: 0.3px;
+      text-shadow: 0 1px 3px rgba(0,0,0,0.9);
+      white-space: nowrap;
+      pointer-events: none;
+      z-index: 90;   /* abaixo do HUD de voz (100) — etiqueta nunca cobre controle */
+    }
+    #nametag.visivel { display: block; }
+
     /* === STATUS CHIP === */
     #voip-status {
       position: fixed;
@@ -359,6 +389,9 @@
 
 <!-- HUD de peers falando -->
 <div id="voip-hud"></div>
+
+<!-- Nametag do personagem mais proximo (POC) -->
+<div id="nametag"></div>
 
 <!-- Trade Overlay -->
 <div id="trade-overlay">
@@ -1128,6 +1161,33 @@
     const msg = normalizePayload(payload);
     if (!msg || !msg.actorId || !msg.ticket) return;
     connectVoip(msg.actorId, msg.ticket, msg.host, msg.port);
+  };
+
+  // Nametag (POC). Chamada pelo snippet de cliente do nametag-service, até
+  // 20x/s enquanto houver alguém em alcance — ver nametag-service.js §2.
+  //
+  // Esta função NÃO decide nada: `nome` chega pronto do servidor, resolvido por
+  // `identity.getDisplayName(observador, alvo)`. É a mesma regra do resto do
+  // projeto ("o servidor decide, o cliente exibe"), e aqui ela é a feature
+  // inteira — se o cliente pudesse escolher o texto, o anonimato não existiria.
+  //
+  // Escreve direto no elemento em vez de passar por `normalizePayload`+DOM
+  // novo: este é o único caminho da UI que roda em frequência, e recriar nó a
+  // 20 Hz é o custo que o HUD de voz já aprendeu a evitar.
+  window.handleNametag = (payload) => {
+    const el = document.getElementById('nametag');
+    if (!el) return;
+    const msg = normalizePayload(payload);
+
+    if (!msg || !msg.visivel) {
+      el.classList.remove('visivel');
+      return;
+    }
+
+    if (el.textContent !== msg.nome) el.textContent = msg.nome || '';
+    el.style.left = msg.x + '%';
+    el.style.top = msg.y + '%';
+    el.classList.add('visivel');
   };
 
   // ── Eventos vindos do backend Node.js ────────────────────────────────────

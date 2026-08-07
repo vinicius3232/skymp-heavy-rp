@@ -219,6 +219,14 @@ const ACOES = {
     permissao: 'retire_character',
     invoca: () => admin.retireCharacter(STAFF_ACTOR_ID, TARGET_ACTOR_ID, 'motivo de teste'),
     aconteceu: () => statusUpdates.some(u => u.status === 'retired')
+  },
+  revealIdentity: {
+    permissao: 'reveal_identity',
+    invoca: () => admin.revealIdentity(STAFF_ACTOR_ID, TARGET_ACTOR_ID),
+    // A sonda é a linha de auditoria, não a notificação. Revelar sem rastro é
+    // pior do que não revelar: a única coisa que torna o poder aceitável é
+    // alguém conseguir provar depois que ele foi usado, contra quem e por quem.
+    aconteceu: () => auditEntries.some(e => e.action === 'identity:staff_reveal')
   }
 };
 
@@ -236,7 +244,11 @@ const MATRIZ = {
   giveItemAdmin:   { nenhum: false, moderator: false, admin: true,  owner: true },
   setGold:         { nenhum: false, moderator: false, admin: true,  owner: true },
   // Morte permanente nunca é decisão de linha de frente.
-  retireCharacter: { nenhum: false, moderator: false, admin: true,  owner: true }
+  retireCharacter: { nenhum: false, moderator: false, admin: true,  owner: true },
+  // Nem furar o anonimato de um jogador: é a única ação de staff que não tem
+  // como ser desfeita — nem por outro comando, nem pelo tempo. Ver o bloco de
+  // ROLE_PERMISSIONS em admin-service.js.
+  revealIdentity:  { nenhum: false, moderator: false, admin: true,  owner: true }
 };
 
 const CARGOS = ['nenhum', 'moderator', 'admin', 'owner'];
@@ -329,7 +341,7 @@ describe('hasPermission recusa argumento invalido', () => {
   });
 
   it('owner tem de fato as permissoes que declara', () => {
-    for (const permissao of ['kick', 'teleport', 'add_item', 'set_gold', 'retire_character', 'manage_staff']) {
+    for (const permissao of ['kick', 'teleport', 'add_item', 'set_gold', 'retire_character', 'manage_staff', 'reveal_identity']) {
       assert.equal(
         admin.hasPermission(STAFF_ACTOR_ID, permissao), true,
         `owner deveria ter '${permissao}'`

@@ -25,6 +25,21 @@ function getActiveCharacterData(actorId) {
   return activeCharacters.get(actorId) || null;
 }
 
+/**
+ * actorIds com personagem carregado, agora.
+ *
+ * O `death-service` responde a mesma pergunta varrendo até 50 profileIds com
+ * `mp.getActorsByProfileId` — o que custa uma ida à API por profileId e devolve
+ * também quem não tem personagem. Este mapa já sabe a resposta exata e de graça:
+ * ele é escrito no login e limpo no `removeActiveCharacter`.
+ *
+ * Devolve cópia: quem itera não pode segurar referência para o Map interno, que
+ * é mutado por login e logout no meio de qualquer laço.
+ */
+function listActiveActorIds() {
+  return [...activeCharacters.keys()];
+}
+
 function getActiveActorByCharacterId(characterId) {
   for (const [actorId, character] of activeCharacters.entries()) {
     if (character.characterId === characterId) {
@@ -316,6 +331,22 @@ function registerCoreCommands() {
     }
   }, { module: 'admin', phase: 'core', description: '[Staff] Define ouro de jogador', usage: '/setgold <actorId> <valor>' });
 
+  // Alias técnico em inglês pelo mesmo padrão de /apresentar → /introduce.
+  // `parseActorId` (e não `parseInt(args, 16)` como os outros de staff) porque
+  // este é o comando que a staff digita copiando um id de um log ou do painel,
+  // onde ele aparece com o prefixo `0x`.
+  commandRegistry.register(['/revelaridentidade', '/revealidentity'], (actorId, args) => {
+    const targetActorId = parseActorId(args);
+    if (!Number.isFinite(targetActorId)) {
+      sendNotification(actorId, 'Uso correto: /revelaridentidade <actorId>');
+      return;
+    }
+    require('./admin-service').revealIdentity(actorId, targetActorId).catch(err => {
+      console.error('[identity] Falha ao revelar identidade:', err.message);
+      sendNotification(actorId, '[Staff] Nao foi possivel revelar a identidade.');
+    });
+  }, { module: 'admin', phase: 'core', description: '[Staff] Revela o nome real de um personagem (auditado)', usage: '/revelaridentidade <actorId>' });
+
   // /status — diagnóstico de estado do personagem (staff)
   commandRegistry.register('/status', (actorId, args) => {
     const charData = getActiveCharacterData(actorId);
@@ -364,6 +395,7 @@ module.exports = {
   removeActiveCharacter,
   getActiveCharacterData,
   getActiveActorByCharacterId,
+  listActiveActorIds,
   handleChatInput,
   broadcastProximityMessage,
   sendNotification

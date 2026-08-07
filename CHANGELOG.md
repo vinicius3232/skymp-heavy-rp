@@ -11,6 +11,30 @@ Versionamento [SemVer](https://semver.org/lang/pt-BR/).
 
 ### Adicionado
 
+- **`/revelaridentidade` — a revelação de identidade por staff, que o desenho pedia desde 12/07/2026.** O [`NAMETAG_IDENTITY_SYSTEM.md`](docs/technical/NAMETAG_IDENTITY_SYSTEM.md) listava *"Staff futura: nome real, com permissao auditada"* como regra 2 de 4 da escada de exibição, e a única implementação que existiu vivia no `disguise-service`, apagado em 06/08 — respondendo com o nome de **quem digitou o comando** em vez do alvo.
+
+  **Comando explícito, não estado passivo.** "Staff sempre vê o nome real" não tem evento para auditar, e a regra pede auditoria: um estado não responde *quem* furou o anonimato de *quem* e *quando*, que é a pergunta de uma arbitragem contestada. Além disso obrigaria o `identity-service` a importar o `admin-service` para consultar o `staffCache` (chaveado por `actorId`, enquanto `getDisplayName` trabalha com personagens), e o efeito apareceria de uma vez em todo chamador — chat local, aba Social, nametag. É a forma de defeito que a [`PARKED_SERVICES_DECISION.md`](docs/technical/PARKED_SERVICES_DECISION.md) §7.1 usou para apagar o `disguise-service`, por dentro em vez de por fora. O preço da escolha é atrito: investigar custa um comando por pessoa. Aceito.
+
+  **Permissão `reveal_identity` nova, `admin` e `owner`.** O candidato fácil era `view_audit`, e é errado pela mesma razão que `add_item` era errado para receita (§7.4): significa ler o que a **staff** fez, não furar o anonimato de um **jogador** — quem auditasse *"quem pode `view_audit`?"* teria a resposta errada. E é permissão de moderador, então reaproveitá-la alargaria o poder para a linha de frente inteira sem decisão. Fora do moderador porque **revelar é a única ação de staff que não desfaz**: kick acaba na reconexão, ouro volta por outro `/setgold`, `/permakill` é soft-delete. Identidade revelada mora na cabeça de quem leu.
+
+  **Não escreve em `character_known_identities`.** Aquilo é conhecimento IC; gravá-lo faria o personagem da staff chamar o alvo pelo nome real no chat para sempre — investigação virando metagaming com rastro de aparência legítima.
+
+  10 testes de comportamento mais a entrada na matriz de cargo × ação. Seis mutações aplicadas e executadas, não previstas: remover a checagem de permissão reprova 4; revelar sem auditar reprova 5; trocar o alvo pelo executor reprova 2; inverter ator/alvo na auditoria reprova 1; dar `reveal_identity` ao moderador reprova 2; gravar em `character_known_identities` reprova 1.
+
+- **`nametag-service.js` — prova de conceito da etiqueta acima da cabeça.** A pergunta que travava a nametag desde a origem era se o servidor consegue saber onde um ator aparece na tela do observador. A resposta é **sim, mas não o servidor**, e essa distinção é a peça inteira.
+
+  **[DOC]** `worldPointToScreenPoint` — *"convert an array of points in the game world to an array of points on the user's screen. The dot on the screen is indicated by 3 numbers from -1 to 1"* (`skymp/docs/skyrim_platform/new_methods.md`; assinatura das tipagens oficiais). **[DOC]** evento `update` — *"Called once for every frame in the game (60 times per second at 60 FPS)"*. As duas assinaturas foram registradas em `types/mp.d.ts` com a procedência.
+
+  **Isso roda no motor JS do cliente, não é `mp.callPapyrusFunction`.** O bloqueio registrado — nametag por Papyrus por quadro inviabilizaria o servidor — vinha das medições que o Red House deixou anotadas (13 ms num `getEquipment`, 35 ms num `av.set`), que são de chamadas do **servidor** para o Papyrus do cliente, ida e volta pela rede. O painel do jogador paga esse preço porque lê vitais de lá. A projeção não paga: é função nativa do próprio processo do jogo. O argumento que bloqueava não se aplica a este caminho.
+
+  **Duas frequências, porque são duas grandezas.** Nome e alvo: 2 s, o mesmo tick da voz — nome só muda quando alguém se apresenta, e a defasagem é a mesma que o `proximity_update` já carrega. Posição na tela: até 20 Hz no cliente, porque a cada 2 s a etiqueta não parece atrasada, parece quebrada. Não é por quadro porque o custo não é a projeção, é o `executeJavaScript` atravessando para a CEF — custo **não medido**, então o padrão é conservador, igual ao HUD de voz.
+
+  **Uma etiqueta, a do mais próximo.** Dez provariam o mesmo e multiplicariam por dez um custo de CEF que ninguém mediu. **Não toca `getDisplayName()`** — é requisito, não conveniência: quando o disfarce virar degrau daquela função (§7.1), a etiqueta passa a mostrar o nome disfarçado sem uma linha de mudança.
+
+  ⚠️ **A projeção nunca foi executada, e isso tem o mesmo peso que "ninguém ouviu ainda" tem na voz nativa.** `ctx.sp.worldPointToScreenPoint` nunca foi chamada — que seja alcançável por esse caminho é **inferência**, não observação; a convenção dos eixos não foi verificada; ponto atrás da câmera é buraco conhecido; o custo a 20 Hz não foi medido; **ninguém validou com dois clientes**, que é o requisito de alfa que aquele documento carrega desde a origem. Desligado por padrão (`ENABLE_NAMETAG_SERVICE`).
+
+  24 testes. Os seis últimos leem o snippet de cliente **como texto** e reprovam padrão proibido — é a única forma de proteger uma decisão sobre código que roda numa máquina que o processo de teste nunca vê; um `callPapyrusFunction` no laço de tela reprova.
+
 - **`soul-service.js` — a Afinidade da Alma passa a falar com o mundo.** `core/soul.js` (domínio puro, 28 testes) estava fechado desde antes; o que faltava era a camada que persiste a alma, entrega sinais, grava marcas, avança a árvore e audita rolagem. O desenho de [`SOUL_AFFINITY.md`](docs/design/SOUL_AFFINITY.md) foi **implementado, não rediscutido**.
 
   Junto vieram as quatro tabelas que aquele documento especifica (migration v10): `character_soul`, `character_signs`, `character_marks`, `character_paths`. Registrado no `module-registry` atrás de `ENABLE_SOUL_SERVICE`, fase `lab`, **desligado por padrão**.
