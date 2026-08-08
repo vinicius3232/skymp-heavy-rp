@@ -1,6 +1,6 @@
 # Fase 0 — Roteiro de teste in-game
 
-**O único bloqueio real do projeto.** 496 testes automatizados passam, e nada nunca rodou numa sessão com jogador. Enquanto este roteiro não for executado, tudo o mais é qualidade sobre código não validado.
+**O único bloqueio real do projeto.** 540 testes automatizados passam, e nada nunca rodou numa sessão com jogador. Enquanto este roteiro não for executado, tudo o mais é qualidade sobre código não validado.
 
 > Substitui o `GOVERNANCE_MARKET_STALLS_TEST_PLAN.md` (13/07/2026), que cobria governança e barracas. Desde então entraram `death-service`, `/painel`, VOIP, master API de sessão e a fila — e o gamemode passou de ~15 para **mais de 60 comandos**. Aquele plano descrevia camadas; este descreve **passos, o que observar, e o que significa falhar**.
 
@@ -22,11 +22,64 @@ Copie o [registro em branco](#registro) para um arquivo novo antes de começar e
 
 ---
 
+## O que nunca rodou com jogador — índice único
+
+Sete sistemas carregam hoje a mesma etiqueta: **confirmado por teste automatizado, nunca confirmado em sessão real.** Eles estavam espalhados por três documentos, e quem preparava uma sessão precisava abrir os três para montar a lista. Esta tabela é a lista.
+
+**Não duplica critério.** Cada linha aponta para o passo detalhado, e é lá que está o que significa passar ou falhar.
+
+| Sistema | O que fazer | O que observar | Passo a passo |
+|---|---|---|---|
+| **`hit-events`** | A bate em B 5 vezes (2 carregadas), os dois param, esperam 15 s | Uma linha `combat:episode` com `golpes: 5`/`powerAttacks: 2` e **os dois lados resolvidos** — é o teste do `0x14` | [9.1](#91-hit-events--o-snippet-de-cliente-chega-ao-servidor) |
+| **`espm`** | `/additem` com `0xf` (válido), `0x14` (Player) e `0x7fffffff` | O válido entra, os dois inválidos são barrados, `character_inventory` fica limpo | [9.2](#92-espm--formid-inválido-é-barrado-antes-de-virar-linha-no-banco) |
+| **`safe-zones`** | Copiar o `.example.json`, ligar uma zona, reiniciar | Que a config **carrega** — o bloqueio não é alcançável in-game hoje, e isso é escopo, não falha | [9.3](#93-safe-zones--pré-requisito-primeiro-e-uma-limitação-a-registrar) |
+| **`soul-service`** | Entrar com ficha preenchida e `SOUL_SECRET` definido | A frase do primeiro sinal na tela, soma 200/150 no banco, **nenhum número** no `/alma` | [9.4](#94-soul-service--a-alma-existe-mas-ninguém-a-viu-chegar) |
+| **Voz — fallback** | `/voz` com `ENABLE_VOIP_SERVICE=true`, sozinho | O chip para em `VOZ INDISPONÍVEL NESTE CLIENT` e **fica nele** | [8.1](#81-o-aviso-de-fallback-aparece-na-tela-1-pessoa-1-client-2-min) |
+| **Voz — nativa** | Helper com ticket, A fala e B escuta | Voz **inteligível** (não só "tem sinal"), volume por distância, sem eco | [8.2](#82-voz-de-verdade-com-o-helper-nativo-12-pessoas-20-min) · [`VOICE_NATIVE_HELPER.md`](VOICE_NATIVE_HELPER.md) §11 |
+| **Identidade — persistência** | Reconectar e reiniciar o servidor depois de `/apresentar` e `/apelido` | Conhecidos e apelidos **sobrevivem aos dois** | [3.5 e 3.6](#etapa-3--identidade-disfarce-e-persistência-8-min-a-e-b) · [`NAMETAG_IDENTITY_SYSTEM.md`](NAMETAG_IDENTITY_SYSTEM.md) |
+
+### Fora desta lista, e por quê
+
+- **Nametag (a etiqueta acima da cabeça) e `/revelaridentidade`** não estão no roteiro porque **não estão na `main`** — vivem na PR #13, que não mesclou. Quando ela entrar, a etapa nova é a projeção mundo-tela (`worldPointToScreenPoint`, que nunca foi chamada) e a revelação por staff, e os critérios já estão nos "Requisitos Para Alfa" do [`NAMETAG_IDENTITY_SYSTEM.md`](NAMETAG_IDENTITY_SYSTEM.md). **Não teste o que não está no seu build.**
+- **Marcas e árvore da Afinidade da Alma** existem e têm teste, mas nenhum caminho de jogo chega até elas — ver a nota ao fim de [9.4](#94-soul-service--a-alma-existe-mas-ninguém-a-viu-chegar).
+- **`npc-cleaner`** está inerte por construção (`blockedBaseDescs` vazia = não remove nada), então não há o que observar. A consequência disso — a fauna vanilla provavelmente já está solta e ativa — é o assunto do [`HOSTILE_MOB_ACTIVATION_DECISION.md`](HOSTILE_MOB_ACTIVATION_DECISION.md), e o censo que ela pede **não é esta Fase 0**.
+
+---
+
+## Flags de ambiente — tudo num lugar só
+
+Todas vão no `skymp/gamemode/.env`. A coluna diz **para qual etapa** cada uma existe, porque ligar tudo de uma vez não é o certo — ver as três ressalvas abaixo.
+
+| Flag | Etapas 1–7 | Etapa 8 (voz) | Etapa 9 | Observação |
+|---|---|---|---|---|
+| `ENABLE_GOVERNANCE_SERVICE` | `true` | — | — | |
+| `ENABLE_MARKET_STALLS_SERVICE` | `true` | — | — | 9.2.6 também usa |
+| `ENABLE_DEATH_SERVICE` | `true` | — | **`true`** | **Pré-requisito de 9.1**: o `hit-events` sobe dentro do `initDeathService` |
+| `ENABLE_PLAYER_PANEL_SERVICE` | `true` | — | — | |
+| `ENABLE_VOIP_SERVICE` | **`false`** | `true` | — | Deliberadamente desligado nas 1–7 (ver Etapa 0) |
+| `VOIP_DEBUG_EXPOSE_TICKET` | `false` | `true` | — | ⚠️ Credencial em texto puro no disco. Lida a cada `/voz`, então desligar **não** exige reiniciar |
+| `VOIP_PUBLIC_HOST` / `VOIP_BIND_HOST` | — | só entre máquinas | — | Padrão `127.0.0.1` só serve na mesma máquina |
+| `ENABLE_SOUL_SERVICE` | `false` | — | `true` só em 9.4 | Voltar para `false` ao fim da etapa |
+| `SOUL_SECRET` | — | — | **obrigatório em 9.4** | Escolha uma vez; trocar depois quebra quem já foi derivado |
+| `ENABLE_NPC_CLEANER` | tanto faz | — | — | Inerte com a lista de bloqueio vazia |
+
+### As três ressalvas — verificadas, não presumidas
+
+**1. `ENABLE_SOUL_SERVICE=true` com `SOUL_SECRET` vazio não derruba o servidor — derruba só o módulo, e o resto sobe normalmente.** O `initSoulService` lança, e o `core/module-registry.js` captura, registra `FALHOU ao inicializar` e **continua o boot**. O efeito prático é o pior possível numa sessão de teste: você joga a sessão inteira achando que a alma está ligada. Confira o log de boot por `[module-registry] soul: ATIVO` antes de confiar em qualquer resultado de 9.4.
+
+**2. O passo 9.4.1 exige um boot com o segredo vazio, de propósito.** Ele testa que o modo de falha aponta para o lado seguro. Ou seja: 9.4 não cabe numa sessão "tudo ligado" — precisa de um boot com o segredo ausente e outro com ele presente.
+
+**3. A etapa 9.3 pede três reinícios do servidor** (config válida, categoria inválida, `enabled: false`). Reiniciar interrompe todo mundo que estiver em jogo, então rode 9.3 no fim, ou numa janela separada.
+
+**Não há nenhum par de flags conhecido por conflitar entre si.** O que impede a sessão única são as três ressalvas acima — todas de sequência de boot, nenhuma de incompatibilidade. Uma sessão contínua cobre **1–7, 9.1 e 9.2**; 9.3, 9.4 e 8 querem os próprios boots.
+
+---
+
 ## Etapa 0 — Antes de ligar qualquer coisa (10 min, sozinho)
 
 | # | Faça | Espere | Se falhar |
 |---|---|---|---|
-| 0.1 | `cd skymp/gamemode && npm test` | 362 passando | Não comece. Conserte antes. |
+| 0.1 | `cd skymp/gamemode && npm test` | 406 passando | Não comece. Conserte antes. |
 | 0.2 | `npm run test:systems` | 13/13 | Comando, permissão ou flag fora do lugar |
 | 0.3 | `npm run check:schema` | `[OK] banco e migrations estao alinhados` | **Aplique as migrations pendentes** (`v2`→`v10`, em ordem; são idempotentes). Banco meio-migrado não quebra o boot — quebra a query que toca a coluna faltante, no meio de uma cena. Foi assim que a v9 nasceu: `characters.gold` estava só no `schema.sql`, então banco antigo migrado em ordem nunca a recebia, e **toda** operação de ouro falharia na etapa 5.6 |
 | 0.4 | Confira `apps/game-api/mods.json` | Existe e tem `mods` e `loadOrder` | `/mods.json` responde 503 e **ninguém entra**. Gere com `node scripts/generate-mods-manifest.js` |
@@ -40,6 +93,8 @@ ENABLE_DEATH_SERVICE=true
 ENABLE_PLAYER_PANEL_SERVICE=true
 ```
 Deixe `ENABLE_VOIP_SERVICE=false` — falar em jogo depende de um componente que ainda não é distribuído (o helper nativo de `VOICE_NATIVE_HELPER.md`; o patch de client de `VOICE_CLIENT_PATCH.md` foi descartado). Ele é a etapa 8, opcional.
+
+> Estas quatro são só o que as etapas 1–7 precisam. A lista completa, com o que cada etapa liga e as três ressalvas de sequência de boot, está em [Flags de ambiente](#flags-de-ambiente--tudo-num-lugar-só).
 
 ⚠️ **`offlineMode: false` no `server-settings.json`.** Com `true` o cliente declara a própria identidade e o servidor acredita — a etapa 2 passaria sem provar nada.
 
@@ -73,7 +128,9 @@ Esta é a cadeia inteira: launcher → paridade → fila → sessão → master 
 
 ---
 
-## Etapa 3 — Identidade e disfarce (5 min, A e B)
+## Etapa 3 — Identidade, disfarce e persistência (8 min, A e B)
+
+Os quatro primeiros passos já existiam. Os dois últimos vêm dos **"Requisitos Para Alfa"** do [`NAMETAG_IDENTITY_SYSTEM.md`](NAMETAG_IDENTITY_SYSTEM.md), que os exige desde 12/07/2026 e nunca tinham sido trazidos para cá — o critério é de lá, não foi reescrito.
 
 | # | Faça | Espere | Se falhar |
 |---|---|---|---|
@@ -81,6 +138,10 @@ Esta é a cadeia inteira: launcher → paridade → fila → sessão → master 
 | 3.2 | B usa `/apresentar` para A | A passa a ver o nome de B | — |
 | 3.3 | A ainda é Desconhecido para B | Sim | Conhecimento **não é recíproco** — é o caso do informante e do espião |
 | 3.4 | A dá um apelido em B (`/apelido`) | A vê o apelido, não o nome civil | — |
+| 3.5 | **A desconecta e reconecta** | A continua vendo o nome de B (3.2) e o apelido (3.4) | Requisito de alfa *"reconexao deve preservar conhecidos e apelidos"*. Se sumiu, o conhecimento só existia em memória — confira `character_known_identities` no banco |
+| 3.6 | **Reinicie o servidor** e A e B voltam | Os dois continuam valendo | Requisito de alfa *"restart do servidor deve preservar conhecidos e apelidos"*. É o teste que separa cache de persistência, e 3.5 pode passar sozinho com o cache quente |
+
+> **Dois requisitos de alfa daquele documento não são testáveis neste build, e não é falha:** *"disfarce ativo deve poder sobrescrever nome publico"* — o `disguise-service` foi apagado em 06/08 ([`PARKED_SERVICES_DECISION.md`](PARKED_SERVICES_DECISION.md) §7.1) e ainda não voltou; e *"staff deve ter comando auditado para revelar identidade"* — o `/revelaridentidade` está na PR #13, não mesclada. Registre os dois como **não aplicável neste build**, não como reprovado.
 
 ---
 
@@ -246,9 +307,9 @@ texto puro no disco de quem testou.
 
 ---
 
-## Etapa 9 — Os três sistemas do Red House (10 min, A e B) 🔴
+## Etapa 9 — Os quatro sistemas que só um jogador conectado prova (10 min, A e B) 🔴
 
-**Nenhum dos três jamais rodou com cliente conectado.** O primeiro boot real validou o servidor sozinho; estes dependem de alguém estar em jogo. Os três vieram do estudo do Red House (`REFERENCE_STUDY_SKYMP_RED_HOUSE.md` §4.1) e são descritos em `ARCHITECTURE.md` 1.4.5–1.4.7.
+**Nenhum dos quatro jamais rodou com cliente conectado.** O primeiro boot real validou o servidor sozinho; estes dependem de alguém estar em jogo. Os três primeiros vieram do estudo do Red House (`REFERENCE_STUDY_SKYMP_RED_HOUSE.md` §4.1) e são descritos em `ARCHITECTURE.md` 1.4.5–1.4.7; o quarto (`soul-service`) entrou depois e não tem relação com aquele estudo — o título dizia "os três" desde antes de ele existir.
 
 Faça **depois da etapa 5** — o `hit-events` sobe dentro do `initDeathService`, então `ENABLE_DEATH_SERVICE=true` é pré-requisito dos três passos de 9.1.
 
@@ -352,6 +413,8 @@ offlineMode: false ☐    Flags ENABLE_* ligadas: ___
 | 1.6 resolve_count | ☐ | valor: ___ |
 | 2 Painel          | ☐ |  |
 | 3 Identidade      | ☐ |  |
+| 3.5 sobrevive à reconexão | ☐ | nome ☐ · apelido ☐ |
+| 3.6 sobrevive ao restart  | ☐ | nome ☐ · apelido ☐ |
 | 4 Chat            | ☐ |  |
 | 5 Morte           | ☐ | tempo até DOWNED: ___ s |
 | 5.2 death:killer  | ☐ | killerId: ___ |
