@@ -38,13 +38,22 @@ Isso muda endereço, `.env` e firewall. Escolha antes de configurar qualquer coi
 
 ## 1.1 Pré-voo — 10 min, sozinho
 
-Rode nesta ordem. Cada um responde uma pergunta diferente, e o terceiro é o que mais custa se você pular.
+Comece pelo verificador somente leitura, escolhendo o perfil e a topologia reais da sessão:
+
+```bash
+cd skymp/gamemode
+npm run preflight:phase0 -- --profile main --topology local
+```
+
+Troque `local` por `lan` ou `internet` quando necessário. O comando lista todas as pendências sem iniciar processos nem mostrar segredos. Os outros perfis e limites do verificador estão em [`PHASE_0_PREFLIGHT.md`](PHASE_0_PREFLIGHT.md).
+
+Depois rode os gates abaixo. Cada um responde uma pergunta diferente, e o schema é o que mais custa se você pular.
 
 ```bash
 cd skymp/gamemode && npm test
 ```
 
-Espere **444 passando**. Se não passar, não continue — você estaria testando em jogo um código que já sabe estar quebrado.
+Espere **0 falhas** (baseline de 12/08/2026: **512 testes**). Se não passar, não continue — você estaria testando em jogo um código que já sabe estar quebrado.
 
 ```bash
 cd skymp/gamemode && npm run test:systems

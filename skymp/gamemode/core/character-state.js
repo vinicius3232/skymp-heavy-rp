@@ -38,10 +38,16 @@ const STATES = Object.freeze({
   DISCONNECTED: 'DISCONNECTED'
 });
 
+/**
+ * @typedef {'NORMAL'|'BUSY'|'DOWNED'|'DEAD'|'RESTRAINED'|'IMPRISONED'|'IN_TRADE'|'IN_CRAFT'|'IN_DIALOG'|'DISCONNECTED'} CharacterState
+ */
+
 // Estados que sobrevivem a restarts (carregados do BD no login)
+/** @type {Set<CharacterState>} */
 const DURABLE_STATES = new Set([STATES.IMPRISONED, STATES.RESTRAINED, STATES.DOWNED]);
 
 // Cache em memória: characterId → { state, metadata, setAt }
+/** @type {Map<number, {state: CharacterState, metadata: object, setAt: number}>} */
 const _stateCache = new Map();
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -52,7 +58,7 @@ const _stateCache = new Map();
  * Carrega o estado durável de um personagem do banco de dados.
  * Chamado no login (whitelist.js).
  * @param {number} characterId
- * @returns {Promise<{state: string, metadata: object}>}
+ * @returns {Promise<{state: CharacterState, metadata: object}>}
  */
 async function _loadDurableState(characterId) {
   try {
@@ -95,7 +101,7 @@ async function _loadDurableState(characterId) {
  * Inicializa o estado de um personagem ao entrar no servidor.
  * Carrega estados duráveis do banco de dados.
  * @param {number} characterId
- * @returns {Promise<string>} Estado inicial
+ * @returns {Promise<CharacterState>} Estado inicial
  */
 async function initialize(characterId) {
   const { state, metadata } = await _loadDurableState(characterId);
@@ -107,7 +113,7 @@ async function initialize(characterId) {
 /**
  * Retorna o estado atual de um personagem.
  * @param {number} characterId
- * @returns {string} Estado atual ou NORMAL se não encontrado
+ * @returns {CharacterState} Estado atual ou NORMAL se não encontrado
  */
 function get(characterId) {
   const entry = _stateCache.get(characterId);
@@ -127,7 +133,7 @@ function getMetadata(characterId) {
 /**
  * Verifica se o personagem está em um estado específico.
  * @param {number} characterId
- * @param {string|string[]} states - Estado ou lista de estados
+ * @param {CharacterState|CharacterState[]} states - Estado ou lista de estados
  * @returns {boolean}
  */
 function is(characterId, states) {
@@ -142,7 +148,7 @@ function is(characterId, states) {
  * seus próprios serviços (governance-service, death-service). Este método apenas atualiza o cache.
  *
  * @param {number} characterId
- * @param {string} newState - Um dos STATES válidos
+ * @param {CharacterState} newState - Um dos STATES válidos
  * @param {object} [metadata] - Dados adicionais sobre o estado
  */
 function set(characterId, newState, metadata = {}) {

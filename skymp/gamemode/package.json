@@ -4,15 +4,17 @@
   "description": "",
   "main": "phase0-basic.js",
   "scripts": {
-    "test": "node --test rp-chat-service.test.js governance-service.test.js governance-service.hardening.test.js market-stalls-service.test.js market-stalls-service.hardening.test.js market-stalls-purchase.test.js player-panel-service.test.js death-service.test.js admin-service.test.js permissions.behavior.test.js identity-service.test.js identity-staff-reveal.test.js nametag-service.test.js voip-service.test.js npc-cleaner.test.js fauna-census.test.js corpse-probe.test.js parked-services-ledger.test.js parked-staff-permissions.test.js soul-service.test.js core/transaction-service.test.js core/action-policy.test.js core/safe-zones.test.js core/espm.test.js core/hit-events.test.js core/ui-event-router.test.js core/panel-refresh-bus.test.js core/death-events.test.js core/server-options.test.js core/papyrus.test.js core/soul.test.js scripts/check-schema-drift.test.js",
+    "test": "node --test rp-chat-service.test.js governance-service.test.js governance-service.hardening.test.js market-stalls-service.test.js market-stalls-service.hardening.test.js market-stalls-purchase.test.js player-panel-service.test.js death-service.test.js admin-service.test.js permissions.behavior.test.js identity-service.test.js identity-staff-reveal.test.js nametag-service.test.js voip-service.test.js npc-cleaner.test.js fauna-census.test.js corpse-probe.test.js parked-services-ledger.test.js parked-staff-permissions.test.js soul-service.test.js core/transaction-service.test.js core/action-policy.test.js core/safe-zones.test.js core/espm.test.js core/hit-events.test.js core/ui-event-router.test.js core/panel-refresh-bus.test.js core/death-events.test.js core/server-options.test.js core/papyrus.test.js core/soul.test.js scripts/check-schema-drift.test.js scripts/typecheck-gate.test.js scripts/phase0-preflight.test.js",
     "test:systems": "node scripts/verify-governance-market-stalls.js",
     "//check:schema": "Confere se o banco real bate com as migrations versionadas. Precisa de banco; sem ele use --list.",
     "check:schema": "node scripts/check-schema-drift.js",
     "check:schema:list": "node scripts/check-schema-drift.js --list",
+    "preflight:phase0": "node scripts/phase0-preflight.js",
     "test:chat": "node rp-chat-service.test.js",
     "test:core": "node --test core/transaction-service.test.js core/action-policy.test.js",
-    "//typecheck": "Informativo: checa o uso da API `mp` (types/mp.d.ts) sem compilar nada. O gamemode continua sendo JS puro carregado direto pelo SkyMP. Erros vindos de dentro de node_modules/ws sao ruido conhecido.",
-    "typecheck": "tsc --noEmit -p jsconfig.json"
+    "//typecheck": "Gate do código ativo. Exibe a dívida PARKED sem deixá-la esconder regressões do que sobe em phase0-basic.js. O gamemode continua JS puro, sem etapa de compilação.",
+    "typecheck": "node scripts/typecheck-gate.js",
+    "typecheck:all": "tsc --noEmit -p jsconfig.json --pretty false"
   },
   "keywords": [],
   "author": "",
@@ -25,6 +27,7 @@
   },
   "devDependencies": {
     "@types/node": "^26.1.2",
+    "@types/ws": "^8.18.1",
     "typescript": "^5.9.3"
   }
 }

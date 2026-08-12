@@ -1,6 +1,6 @@
 # Fase 0 — Roteiro de teste in-game
 
-**O único bloqueio real do projeto.** 578 testes automatizados passam, e nada nunca rodou numa sessão com jogador. Enquanto este roteiro não for executado, tudo o mais é qualidade sobre código não validado.
+**O único bloqueio real do projeto.** 512 testes automatizados passam, e nada nunca rodou numa sessão com jogador. Enquanto este roteiro não for executado, tudo o mais é qualidade sobre código não validado.
 
 > Substitui o `GOVERNANCE_MARKET_STALLS_TEST_PLAN.md` (13/07/2026), que cobria governança e barracas. Desde então entraram `death-service`, `/painel`, VOIP, master API de sessão e a fila — e o gamemode passou de ~15 para **mais de 60 comandos**. Aquele plano descrevia camadas; este descreve **passos, o que observar, e o que significa falhar**.
 
@@ -80,11 +80,12 @@ Todas vão no `skymp/gamemode/.env`. A coluna diz **para qual etapa** cada uma e
 
 | # | Faça | Espere | Se falhar |
 |---|---|---|---|
-| 0.1 | `cd skymp/gamemode && npm test` | 444 passando | Não comece. Conserte antes. |
-| 0.2 | `npm run test:systems` | 13/13 | Comando, permissão ou flag fora do lugar |
-| 0.3 | `npm run check:schema` | `[OK] banco e migrations estao alinhados` | **Aplique as migrations pendentes** (`v2`→`v10`, em ordem; são idempotentes). Banco meio-migrado não quebra o boot — quebra a query que toca a coluna faltante, no meio de uma cena. Foi assim que a v9 nasceu: `characters.gold` estava só no `schema.sql`, então banco antigo migrado em ordem nunca a recebia, e **toda** operação de ouro falharia na etapa 5.6 |
-| 0.4 | Confira `apps/game-api/mods.json` | Existe e tem `mods` e `loadOrder` | `/mods.json` responde 503 e **ninguém entra**. Gere com `node scripts/generate-mods-manifest.js` |
-| 0.5 | `.\scripts\phase0\Start-AllServices.ps1` | Nenhum aviso vermelho | O script diz o que não vai subir. Ele não mente por otimismo |
+| 0.1 | `cd skymp/gamemode && npm run preflight:phase0 -- --profile main --topology <local\|lan\|internet>` | 0 erros | Corrija a lista completa antes de chamar testadores. Consulte [`PHASE_0_PREFLIGHT.md`](PHASE_0_PREFLIGHT.md) |
+| 0.2 | `npm test` | 0 falhas (baseline atual: 512 testes) | Não comece. Conserte antes. |
+| 0.3 | `npm run test:systems` | 13/13 | Comando, permissão ou flag fora do lugar |
+| 0.4 | `npm run check:schema` | `[OK] banco e migrations estao alinhados` | **Aplique as migrations pendentes** (`v2`→`v10`, em ordem; são idempotentes). Banco meio-migrado não quebra o boot — quebra a query que toca a coluna faltante, no meio de uma cena. Foi assim que a v9 nasceu: `characters.gold` estava só no `schema.sql`, então banco antigo migrado em ordem nunca a recebia, e **toda** operação de ouro falharia na etapa 5.6 |
+| 0.5 | Confira `apps/game-api/mods.json` | Existe e tem `mods` e `loadOrder` | `/mods.json` responde 503 e **ninguém entra**. Gere com `node scripts/generate-mods-manifest.js` |
+| 0.6 | `.\scripts\phase0\Start-AllServices.ps1` | Nenhum aviso vermelho | O script diz o que não vai subir. Ele não mente por otimismo |
 
 **Flags no `.env` do gamemode:**
 ```

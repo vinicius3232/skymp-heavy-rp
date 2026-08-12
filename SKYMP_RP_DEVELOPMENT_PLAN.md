@@ -773,6 +773,8 @@ Rodar o projeto de forma sustentavel.
 
 ## 14. Próximo Passo Imediato
 
+> O roteiro executivo desta etapa, incluindo gates, responsáveis e os pacotes destinados ao Claude a partir de 13/08/2026, está em [`docs/roadmap/PLANO_EXECUCAO_POS_FORKS_2026-08.md`](docs/roadmap/PLANO_EXECUCAO_POS_FORKS_2026-08.md).
+
 > Reescrito em 07/08/2026. A versão anterior apontava para **Housing** ou "refinar combate/física" e foi escrita antes de `hit-events`, `espm`, `safe-zones`, `core/soul.js` e do primeiro boot real do servidor existirem. Housing continua PARKED por decisão registrada, e o combate é do cliente — o servidor não arbitra golpe.
 
 **O próximo passo não é uma feature. É conectar um cliente.**

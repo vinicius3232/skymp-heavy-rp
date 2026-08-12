@@ -22,8 +22,8 @@ const _commands = new Map();
  *
  * @param {string|string[]} command - Comando (ex: '/chopwood') ou lista de aliases
  * @param {Function} handler - async function(actorId, args) → void
- * @param {object} opts
- * @param {string} opts.module - ID do módulo de origem
+ * @param {object} [opts]
+ * @param {string} [opts.module] - ID do módulo de origem; usa `unknown` quando omitido
  * @param {string} [opts.phase] - Fase do módulo ('core', 'lab', 'parked')
  * @param {string} [opts.description] - Descrição para /help
  * @param {string} [opts.usage] - Exemplo de uso

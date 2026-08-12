@@ -12,12 +12,12 @@
   "license": "AGPL-3.0-or-later",
   "type": "commonjs",
   "dependencies": {
-    "discord.js": "^14.26.5",
+    "discord.js": "^14.27.0",
     "dotenv": "^17.4.2",
     "express": "^4.22.2",
     "mysql2": "^3.22.6"
   },
   "overrides": {
-    "undici": "6.27.0"
+    "undici": "6.28.0"
   }
 }
