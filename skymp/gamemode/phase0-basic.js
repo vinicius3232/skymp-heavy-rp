@@ -322,7 +322,25 @@ moduleRegistry.register({
     }
 
     voipService.startVoipServer();
-  }
+
+    // O Voice Core em voz alta no boot: intervalo do tick, tamanho de bucket e
+    // estado do gateway. Sem isto, "a voz está lenta" e "o LiveKit não está
+    // configurado" chegariam ao diagnóstico como a mesma frase.
+    const core = voipService.voiceCore.describe();
+    console.log(
+      `[voip] Voice Core: tick ${core.tickMs} ms, bucket ${core.spatial.bucketSize} u, ` +
+      `gateway ${core.gateway.state}` +
+      `${core.gateway.configured ? '' : ` (falta: ${core.gateway.missing.join(', ')})`}`
+    );
+  },
+  shutdown: async () => {
+    voipService.stopVoipServer();
+  },
+  // Saudável = o laço de proximidade está rodando. O gateway do LiveKit fora do
+  // ar NÃO conta como módulo doente: a voz degrada, o jogo não, e marcar o
+  // módulo como falho por causa de um SFU externo faria o diagnóstico apontar
+  // para o lugar errado.
+  healthCheck: () => voipService.voiceCore.describe().running
 });
 
 // LAB: Nametag visual — PROVA DE CONCEITO, uma etiqueta (o mais próximo).

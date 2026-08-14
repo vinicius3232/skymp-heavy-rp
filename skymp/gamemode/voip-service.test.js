@@ -29,6 +29,24 @@ const { VOICE_RANGES } = require('./core/proximity-ranges');
 
 Module._load = originalLoad;
 
+  /**
+   * Registra um personagem ativo para o ator, se ainda não houver.
+   *
+   * Não é decoração de teste: desde a refatoração de 14/08/2026 o servidor só
+   * deixa falar quem tem personagem carregado (`voice-policy.canSpeak`), e em
+   * produção isso já era verdade por outro caminho — `issueTicket` só é
+   * alcançável pelo `/voz`, que devolve cedo sem personagem ativo. Estes testes
+   * chamam `issueTicket` direto e pulavam essa etapa; registrar aqui aproxima o
+   * teste do que o servidor realmente vê.
+   */
+  function comPersonagem(actorId) {
+    if (!commands.getActiveCharacterData(actorId)) {
+      commands.registerActiveCharacter(actorId, { id: actorId, first_name: 'Teste', last_name: 'Voz' }, 1, 1);
+    }
+    return actorId;
+  }
+
+
 const ACTOR_ID = 0xff00b001;
 let port;
 
@@ -267,7 +285,7 @@ describe('voip-service — relay de audio_frame por proximidade', () => {
   beforeEach(() => {
     positions.clear();
     voip._pendingTickets.clear();
-    voip._audienceByActor.clear();
+    voip.voiceCore.routes.reset();
   });
 
   afterEach(async () => {
@@ -291,6 +309,7 @@ describe('voip-service — relay de audio_frame por proximidade', () => {
    * exercitando o caminho de compatibilidade sem pedir nada a ele.
    */
   async function connectAuthed(actorId, role) {
+    comPersonagem(actorId);
     const ticket = voip.issueTicket(actorId, role || 'listener');
     const ws = track(new WebSocket(`ws://127.0.0.1:${relayPort}`));
     ws.received = [];
@@ -619,7 +638,7 @@ describe('voip-service — helper e UI do mesmo ator convivendo', () => {
   beforeEach(() => {
     positions.clear();
     voip._pendingTickets.clear();
-    voip._audienceByActor.clear();
+    voip.voiceCore.routes.reset();
     voip._voipClients.clear();
   });
 
@@ -632,6 +651,7 @@ describe('voip-service — helper e UI do mesmo ator convivendo', () => {
   });
 
   async function connectAs(actorId, role) {
+    comPersonagem(actorId);
     const ticket = voip.issueTicket(actorId, role);
     const ws = new WebSocket(`ws://127.0.0.1:${dualPort}`);
     openSockets.push(ws);
@@ -935,7 +955,7 @@ describe('voip-service — proximidade respeita a célula', () => {
   beforeEach(() => {
     locs.clear();
     voip._pendingTickets.clear();
-    voip._audienceByActor.clear();
+    voip.voiceCore.routes.reset();
     voip._voipClients.clear();
   });
 
@@ -948,6 +968,7 @@ describe('voip-service — proximidade respeita a célula', () => {
   });
 
   async function connectAs(actorId, role) {
+    comPersonagem(actorId);
     const ticket = voip.issueTicket(actorId, role || 'listener');
     const ws = new WebSocket(`ws://127.0.0.1:${cellPort}`);
     openSockets.push(ws);
@@ -1025,7 +1046,7 @@ describe('voip-service — proximidade respeita a célula', () => {
 
     // E o mesmo mapa é o que o relay consulta: audiência errada aqui é áudio
     // entregue a quem não deveria receber, não só um ganho errado no slider.
-    const audience = voip._audienceByActor.get(IN_TAVERN) || [];
+    const audience = voip.voiceCore.audienceFor(IN_TAVERN);
     assert.strictEqual(
       audience.filter((a) => a.actorId === IN_DUNGEON).length, 0,
       'a audiência do locutor não pode conter alguém de outra célula'
