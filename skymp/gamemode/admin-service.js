@@ -673,7 +673,162 @@ async function voiceUnmute(actorId, targetActorId) {
   return { ok: true, changed: result.changed };
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Diagnóstico e ciclo de vida da voz
+//
+// As três ações abaixo compartilham uma decisão: elas mexem no TRANSPORTE de voz
+// de alguém, nunca no personagem e nunca na presença no jogo. Um cliente de voz
+// travado — cadeia de áudio duplicada, sessão zumbi, helper que parou de
+// responder — se resolve derrubando a voz, e derrubar o jogador junto seria uma
+// punição que ele não recebeu.
+//
+// Por isso elas ficam em `voice_mute` e não em `kick`: quem pode calar pode
+// destravar, e quem pode expulsar é outra conversa.
+//
+// **Toda uma delas gera audit log, inclusive a consulta.** Consultar o
+// diagnóstico de um jogador é olhar o estado de voz dele; num sistema de
+// moderação, quem olhou também é registro.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Injeção do diagnóstico.
+ *
+ * O `admin-service` NÃO importa o Voice Core. A direção da dependência é a
+ * mesma que `voice-staff-mute` protege: staff não conhece voz. Quem liga os dois
+ * é o `voip-service`, que já é dono do Voice Core, chamando isto no boot.
+ *
+ * Sem injeção, as três ações respondem "voz não disponível" — que é a verdade
+ * num servidor com `ENABLE_VOIP_SERVICE=false`.
+ *
+ * @type {{forActor: Function, overview: Function, roster: Function, disconnect: Function, forceReconnect: Function, summaryLine: Function}|null}
+ */
+let voiceDiagnostics = null;
+
+/** @param {any} diagnostics */
+function bindVoiceDiagnostics(diagnostics) {
+  voiceDiagnostics = diagnostics;
+}
+
+function _semVoz(actorId) {
+  commands.sendNotification(actorId, 'O sistema de voz nao esta ativo neste servidor.');
+  return { ok: false, reason: 'voz não disponível' };
+}
+
+/**
+ * `/vozdiag [actorId]` — o estado de voz de um jogador, com o motivo.
+ *
+ * Permissão: `voice_mute`. Responde "por que fulano não está sendo ouvido?", que
+ * sem isto se responde abrindo o log do servidor com `grep`.
+ *
+ * @param {number} actorId staff
+ * @param {number} targetActorId alvo
+ */
+async function voiceDiagnose(actorId, targetActorId) {
+  if (!hasPermission(actorId, 'voice_mute')) {
+    sendDenied(actorId);
+    return { ok: false, reason: 'sem permissão' };
+  }
+  if (!voiceDiagnostics) return _semVoz(actorId);
+
+  const charData = commands.getActiveCharacterData(actorId);
+  const targetData = commands.getActiveCharacterData(targetActorId);
+  const report = voiceDiagnostics.forActor(targetActorId);
+  const resumo = voiceDiagnostics.summaryLine(targetActorId);
+
+  await auditLog(
+    charData?.accountId, targetData?.accountId, 'staff:voice_diagnostics',
+    `role=${getRole(actorId)} ${resumo}`
+  );
+
+  commands.sendNotification(actorId,
+    `Voz de ${nomeParaLog(targetData, targetActorId)}: ` +
+    `${report.voiceConnected ? 'conectada' : 'DESCONECTADA'} (${report.reconnectState}), ` +
+    `modo ${report.voiceMode ?? '-'}, ` +
+    `${report.staffMuted ? 'SILENCIADA pela staff, ' : ''}` +
+    `${report.canSpeakNow ? 'pode falar' : `nao pode falar: ${report.reason}`}`
+  );
+  console.log(`[admin] ${actorId.toString(16)} consultou voz de ${targetActorId.toString(16)}: ${resumo}`);
+
+  return { ok: true, report };
+}
+
+/**
+ * `/vozdesconectar [actorId] [motivo]` — derruba a voz sem tirar do jogo.
+ *
+ * @param {number} actorId staff
+ * @param {number} targetActorId alvo
+ * @param {string} [reason]
+ */
+async function voiceDisconnect(actorId, targetActorId, reason = 'sem motivo registrado') {
+  if (!hasPermission(actorId, 'voice_mute')) {
+    sendDenied(actorId);
+    return { ok: false, reason: 'sem permissão' };
+  }
+  if (!voiceDiagnostics) return _semVoz(actorId);
+
+  const charData = commands.getActiveCharacterData(actorId);
+  const targetData = commands.getActiveCharacterData(targetActorId);
+  const result = voiceDiagnostics.disconnect(targetActorId, reason);
+
+  // Registra mesmo quando não havia voz a derrubar: a TENTATIVA é o ato de
+  // moderação, e um audit log que só grava sucesso esconde metade do que a staff
+  // fez.
+  await auditLog(
+    charData?.accountId, targetData?.accountId, 'staff:voice_disconnect',
+    `role=${getRole(actorId)} reason=${reason} ok=${result.ok}${result.ok ? '' : ` motivo=${result.reason}`}`
+  );
+
+  if (!result.ok) {
+    commands.sendNotification(actorId, 'Esse jogador nao esta na voz.');
+    return result;
+  }
+
+  commands.sendNotification(targetActorId, 'Sua conexao de voz foi encerrada pela staff. Use /voz para reconectar.');
+  commands.sendNotification(actorId, `Voz de ${nomeParaLog(targetData, targetActorId)} desconectada.`);
+  console.log(`[admin] ${actorId.toString(16)} (${getRole(actorId)}) desconectou a voz de ${targetActorId.toString(16)}: ${reason}`);
+
+  return result;
+}
+
+/**
+ * `/vozreconectar [actorId]` — reemite o token mantendo a identidade.
+ *
+ * Não é desconectar e reconectar: manter a identidade preserva as assinaturas
+ * que os outros já têm. É a ação para "o áudio dele parou mas ele ainda está lá".
+ *
+ * @param {number} actorId staff
+ * @param {number} targetActorId alvo
+ */
+async function voiceForceReconnect(actorId, targetActorId) {
+  if (!hasPermission(actorId, 'voice_mute')) {
+    sendDenied(actorId);
+    return { ok: false, reason: 'sem permissão' };
+  }
+  if (!voiceDiagnostics) return _semVoz(actorId);
+
+  const charData = commands.getActiveCharacterData(actorId);
+  const targetData = commands.getActiveCharacterData(targetActorId);
+  const result = voiceDiagnostics.forceReconnect(targetActorId);
+
+  await auditLog(
+    charData?.accountId, targetData?.accountId, 'staff:voice_force_reconnect',
+    `role=${getRole(actorId)} ok=${result.ok} transport=${result.transport ?? '-'}` +
+    `${result.ok ? '' : ` motivo=${result.reason}`}`
+  );
+
+  commands.sendNotification(actorId, result.ok
+    ? `Voz de ${nomeParaLog(targetData, targetActorId)} reconectada${result.note ? ` (${result.note})` : ''}.`
+    : `Nao foi possivel reconectar: ${result.reason}`);
+  console.log(`[admin] ${actorId.toString(16)} forcou reconexao de voz de ${targetActorId.toString(16)}: ok=${result.ok}`);
+
+  return result;
+}
+
 module.exports = {
+  bindVoiceDiagnostics,
+  voiceDiagnose,
+  voiceDisconnect,
+  voiceForceReconnect,
   registerStaffRole,
   removeStaffRole,
   hasPermission,

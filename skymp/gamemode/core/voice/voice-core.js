@@ -64,12 +64,13 @@ const { createVoicePolicyEngine } = require('./voice-policy');
 const { createVoiceSpatialIndex } = require('./voice-spatial-index');
 const { createVoiceRouteEngine } = require('./voice-route-engine');
 const { createVoiceSessionService } = require('./voice-session');
+const livekitToken = require('./livekit-token');
 const { createVoiceLiveKitGateway } = require('./livekit-gateway');
 const { createVoiceCharacterAdapter } = require('./voice-character-adapter');
 const { createVoiceOcclusion } = require('./voice-occlusion');
 const { createVoiceSpeakingState } = require('./voice-speaking-state');
 const { createVoiceSpeechAnimation } = require('./voice-speech-animation');
-const { effectSettings } = require('./voice-conditions');
+const { effectSettings, VOICE_CONDITIONS } = require('./voice-conditions');
 const serverOptions = require('../server-options');
 
 /**
@@ -122,6 +123,7 @@ const DEFAULT_MIN_CRITICAL_INTERVAL_MS = 20;
  * @param {any} [deps.occlusion]
  * @param {any} [deps.speaking]
  * @param {any} [deps.speechAnimation]
+ * @param {any} [deps.staffMute] registro de silêncio de staff; padrão é o compartilhado
  * @param {boolean} [deps.spatial]
  */
 function createVoiceCore(deps = {}) {
@@ -157,24 +159,66 @@ function createVoiceCore(deps = {}) {
 
   const metrics = deps.metrics || createVoiceMetrics();
   const state = deps.state || createVoiceStateService({ now });
+
+  // O registro de silêncio de staff é resolvido ANTES do adapter, e isso não é
+  // arrumação de código.
+  //
+  // O adapter é quem traduz `STAFF_MUTED` para a política, e ele monta o próprio
+  // registro por padrão — o compartilhado do processo. Se o Voice Core resolvesse
+  // o dele depois e guardasse outro, existiriam **dois registros de punição**: o
+  // que o adapter consulta para recusar a fala, e o que o Voice Core observa para
+  // reemitir o token. Eles concordariam em produção (ambos são o compartilhado) e
+  // divergiriam em teste — que é o pior arranjo possível, porque o defeito só
+  // aparece onde ninguém o procura.
+  //
+  // Resolvido uma vez, passado ao adapter, observado aqui: um registro só.
+  const staffMuteRegistry = deps.staffMute !== undefined
+    ? deps.staffMute
+    : require('./voice-staff-mute').sharedVoiceStaffMute;
+
   // O Voice Core é quem liga a política ao personagem REAL. A política sozinha
   // nasce com o adapter nulo (ver `voice-policy`), para que um teste de alcance
   // não precise de banco; aqui, onde há mundo, ela ganha o adapter que lê
   // `core/character-state`.
-  const conditions = deps.conditions || createVoiceCharacterAdapter();
+  const conditions = deps.conditions || createVoiceCharacterAdapter({ staffMute: staffMuteRegistry });
   const occlusion = deps.occlusion || createVoiceOcclusion({ metrics });
   const policy = deps.policy || createVoicePolicyEngine({ state, metrics, conditions, occlusion });
   const index = deps.index || createVoiceSpatialIndex({ bucketSize, metrics });
   const spatialEnabled = deps.spatial !== undefined ? deps.spatial : serverOptions.get('voice.spatial.enabled');
   const routes = deps.routes || createVoiceRouteEngine({ state, policy, index, metrics, spatial: spatialEnabled });
   const sessions = deps.sessions || createVoiceSessionService({ state, metrics, logger, now });
-  const gateway = deps.gateway || createVoiceLiveKitGateway({ metrics, logger, now });
+  // `mintAdminToken` é OBRIGATÓRIO aqui, e a ausência dele era um defeito real:
+  // o gateway recusa toda chamada sem emissor de token de operador, devolvendo
+  // `{ok: false, skipped: true}` — sem erro, sem falha de circuito, sem métrica
+  // de falha. Até esta etapa nenhum caminho de produção passava um (só os
+  // testes), então `UpdateSubscriptions`, `RemoveParticipant` e
+  // `MutePublishedTrack` **nunca saíam do processo**. O gateway se descrevia
+  // saudável e não falava com o SFU nenhuma vez.
+  const gateway = deps.gateway || createVoiceLiveKitGateway({
+    metrics, logger, now,
+    mintAdminToken: livekitToken.mintAdminToken
+  });
   const speaking = deps.speaking || createVoiceSpeakingState({ policy, now });
   const speechAnimation = deps.speechAnimation || createVoiceSpeechAnimation({ mp: injectedMp, logger, now });
 
   // A animação é ASSINANTE do estado de fala, não um segundo dono dele. É o que
   // faz as cinco garantias de parada valerem para ela sem serem reimplementadas.
   speechAnimation.bind(speaking);
+
+  // O Voice Core assina o registro de silêncio de staff. A inscrição vive aqui,
+  // e não no `admin-service`, porque a dependência tem que apontar de voz para
+  // staff — nunca o contrário. Ver `onChange` em `voice-staff-mute.js`.
+  if (staffMuteRegistry && typeof staffMuteRegistry.onChange === 'function') {
+    staffMuteRegistry.onChange((characterId) => {
+      // Encontra o ator daquele personagem. É uma varredura sobre as sessões
+      // abertas, e não um índice, porque calar é um ato humano — algumas por
+      // hora no pior dia — enquanto um índice seria mais uma estrutura a manter
+      // coerente em todo attach, detach e troca de personagem.
+      for (const session of sessions.all()) {
+        if (session.characterId === characterId) refreshGrants(session.actorId);
+      }
+    });
+  }
 
   /**
    * O `mp` em vigor: o injetado, ou o global do host no instante da chamada.
@@ -401,7 +445,7 @@ function createVoiceCore(deps = {}) {
    * A máquina de estados é a mesma nos dois; o que muda é quem a alimenta.
    *
    * @param {number} actorId
-   * @param {{characterId?: number|null, name?: string, transport?: 'legacy'|'livekit'}} [opts]
+   * @param {{characterId?: number|null, name?: string, transport?: 'legacy'|'livekit', canPublish?: boolean}} [opts]
    */
   function attach(actorId, opts = {}) {
     state.ensure(actorId, { characterId: opts.characterId ?? null });
@@ -413,7 +457,10 @@ function createVoiceCore(deps = {}) {
       return { ok: true, session: null, transport: 'legacy', evicted: null };
     }
 
-    const opened = sessions.open(actorId, opts);
+    const opened = sessions.open(actorId, {
+      ...opts,
+      canPublish: opts.canPublish !== undefined ? opts.canPublish : publishGrantFor(opts.characterId ?? null)
+    });
 
     if (opened.evicted) {
       // Despejo da sessão superada. `forget` primeiro para que o diff do
@@ -458,10 +505,64 @@ function createVoiceCore(deps = {}) {
     return closed;
   }
 
+  /**
+   * A permissão DURÁVEL de publicar deste personagem, para o token.
+   *
+   * Só o silêncio de staff entra aqui. Morte, mordaça, abatimento e PTT também
+   * decidem se sai voz, e **nenhum deles** deve virar permissão de token: são
+   * estados que mudam em segundos, e reemitir token a cada um seria um handshake
+   * WebRTC por morte. Eles continuam sendo rota — que é o mecanismo desenhado
+   * para mudar rápido.
+   *
+   * O silêncio de staff é diferente em espécie: dura horas ou até alguém
+   * desfazer, é uma punição, e é exatamente o caso em que a degradação do
+   * gateway (circuito aberto) não pode devolver a voz.
+   *
+   * @param {number|null} characterId
+   */
+  function publishGrantFor(characterId) {
+    if (!Number.isFinite(characterId)) return true;
+    try {
+      return !conditions.conditionsOf(characterId).includes(VOICE_CONDITIONS.STAFF_MUTED);
+    } catch {
+      // Um adapter que lança não pode calar ninguém. Falha de leitura vira
+      // "pode falar", e a rota continua sendo a camada que decide de verdade —
+      // negar por erro de leitura silenciaria inocentes sem registro nenhum.
+      return true;
+    }
+  }
+
   /** Identidade LiveKit de um ator, para o gateway traduzir arestas. */
   function identityOf(actorId) {
     const session = sessions.get(actorId);
     return session ? session.identity : null;
+  }
+
+  /**
+   * Reemite o token da sessão com a permissão durável recalculada.
+   *
+   * Chamado quando a staff cala ou descala alguém que **já está conectado**. Sem
+   * isto, `/calar` só valeria a partir da próxima conexão — e a rota, que é o
+   * corte primário, continuaria sendo a única defesa (a que o circuito aberto
+   * desliga).
+   *
+   * Devolve `{ok: false}` sem barulho quando não há sessão LiveKit: no caminho
+   * legado não existe token, e o silêncio é aplicado pela rota, que já foi
+   * recalculada por `markCritical`. Não é falha; é outro transporte.
+   *
+   * @param {number} actorId
+   * @returns {{ok: boolean, canPublish?: boolean, token?: string, url?: string, reason?: string}}
+   */
+  function refreshGrants(actorId) {
+    const session = sessions.get(actorId);
+    if (!session) return { ok: false, reason: 'sem sessão' };
+    const canPublish = publishGrantFor(session.characterId);
+    const renewed = sessions.renew(actorId, { canPublish });
+    // A rota é recalculada de qualquer jeito: ela é o corte que age no tick
+    // seguinte, enquanto o token novo só vale quando o cliente o apresentar.
+    markCritical(actorId, 'grants');
+    if (!renewed.ok) return { ok: false, canPublish, reason: renewed.reason };
+    return { ok: true, canPublish, token: renewed.token, url: renewed.url };
   }
 
   // ───────────────────────────────────────────────────────────────────────────
@@ -657,7 +758,7 @@ function createVoiceCore(deps = {}) {
     // laço
     start, stop, shutdown, recompute, markCritical, sample,
     // ciclo de vida
-    attach, detach, identityOf,
+    attach, detach, identityOf, refreshGrants, publishGrantFor,
     // intenções do cliente
     requestVoiceMode, requestMute, pttDown, pttUp, noteAudioFrame,
     // consulta

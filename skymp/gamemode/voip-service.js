@@ -78,6 +78,7 @@ const path = require('path');
 const ws = require('ws');
 const { WebSocketServer, WebSocket } = ws;
 const commands = require('./commands');
+const voiceSecurity = require('./core/voice/voice-security');
 
 const VOIP_PORT = Number.parseInt(process.env.VOIP_PORT, 10) || 7778;
 const VOIP_BIND_HOST = process.env.VOIP_BIND_HOST || '127.0.0.1';
@@ -167,6 +168,8 @@ function _ticketKey(actorId, role) {
 // A instância é única e criada no load porque o serviço de voz também é único;
 // `startVoipServer` liga o laço e `stopVoipServer` o desliga.
 const { createVoiceCore } = require('./core/voice/voice-core');
+const { createVoiceTelemetry } = require('./core/voice/voice-telemetry');
+const { createVoiceDiagnostics } = require('./core/voice/voice-diagnostics');
 const { volumeAt } = require('./core/voice/voice-policy');
 
 const voiceCore = createVoiceCore();
@@ -304,7 +307,22 @@ function _consumeAudioFrameQuota(conn, now = Date.now()) {
 function startVoipServer(port = VOIP_PORT, host = VOIP_BIND_HOST) {
   if (wss) return;
 
-  wss = new WebSocketServer({ port, host, maxPayload: MAX_VOIP_MESSAGE_BYTES });
+  wss = new WebSocketServer({
+    port, host, maxPayload: MAX_VOIP_MESSAGE_BYTES,
+    // Allowlist de origem, quando configurada. É defesa em profundidade e não
+    // substitui o ticket: quem escolhe o header escolhe omiti-lo, e por isso
+    // ausência de `Origin` é ACEITA — o `voice-helper.exe` não é um navegador e
+    // não manda um. O que isto barra de verdade é o caso do navegador, onde o
+    // header é obrigatório e a página não consegue removê-lo.
+    verifyClient: (info) => {
+      const origin = info.origin || (info.req && info.req.headers && info.req.headers.origin);
+      const verdict = voiceSecurity.checkOrigin(origin);
+      if (!verdict.allowed) {
+        console.warn(`[voip] Handshake recusado — ${verdict.reason}`);
+      }
+      return verdict.allowed;
+    }
+  });
 
   wss.on('listening', () => {
     console.log(`[voip] WebSocket signaling server listening on ws://${host}:${port}`);
@@ -332,12 +350,22 @@ function startVoipServer(port = VOIP_PORT, host = VOIP_BIND_HOST) {
           const claimedRole = msg.role === undefined ? DEFAULT_VOIP_ROLE : msg.role;
           if (!VOIP_ROLES.includes(claimedRole)) {
             console.log(`[voip] Auth rejeitada (role desconhecido: ${msg.role}) para actorId ${msg.actorId}.`);
+            // Contado para `voice_auth_failures`. Autenticação falha em quatro
+            // lugares diferentes (aqui, identidade desconhecida, identidade que
+            // não sobrevive à leitura, emissão de token) e a operação precisa de
+            // UM número — ver `voice-telemetry.js`.
+            voiceCore.metrics.count('legacy.authRejected');
             ws.send(JSON.stringify({ type: 'auth_failed' }));
             ws.close();
             return;
           }
           if (!Number.isFinite(claimedActorId) || !_consumeTicket(claimedActorId, msg.ticket, claimedRole)) {
             console.log(`[voip] Auth rejeitada (ticket inválido/expirado) para actorId ${msg.actorId} como ${claimedRole}.`);
+            // Contado para `voice_auth_failures`. Autenticação falha em quatro
+            // lugares diferentes (aqui, identidade desconhecida, identidade que
+            // não sobrevive à leitura, emissão de token) e a operação precisa de
+            // UM número — ver `voice-telemetry.js`.
+            voiceCore.metrics.count('legacy.authRejected');
             ws.send(JSON.stringify({ type: 'auth_failed' }));
             ws.close();
             return;
@@ -759,13 +787,31 @@ function requestVoiceConnection(actorId) {
 
   if (typeof mp === 'undefined') return;
   try {
-    mp.set(actorId, 'voipTicket', {
+    const payload = {
       actorId,
       ticket,
       host: VOIP_PUBLIC_HOST,
       port: VOIP_PORT,
       sentAt: Date.now()
-    });
+    };
+
+    // Última conferência antes de o objeto sair do processo. Não protege contra
+    // este payload — ele é conhecido, curto e obviamente limpo. Protege contra a
+    // versão dele daqui a seis meses, quando alguém precisar mandar "a
+    // configuração do LiveKit" ao cliente e espalhar um objeto de config aqui
+    // dentro. É o ponto exato onde um `...config` transforma "manda o token" em
+    // "manda o secret", e o custo de conferir é uma varredura de string por
+    // `/voz`, que é um comando humano.
+    const leak = voiceSecurity.assertNoSecretsIn(payload);
+    if (!leak.clean) {
+      console.error(
+        `[voip] BLOQUEADO: o payload de voz carregava ${leak.leaked.join(', ')}. ` +
+        'Nada foi enviado ao cliente.'
+      );
+      return;
+    }
+
+    mp.set(actorId, 'voipTicket', payload);
   } catch (err) {
     console.error('[voip] Falha ao enviar ticket de voz:', err.message);
   }
@@ -821,6 +867,39 @@ function _exposeDebugTicket(actorId, senderTicket) {
   }
 }
 
+/**
+ * Telemetria e diagnóstico deste Voice Core.
+ *
+ * Ficam aqui porque este arquivo é o dono da instância do Voice Core. Criá-los
+ * em outro lugar exigiria exportar o core, e um core exportado é um core que
+ * alguém instancia duas vezes — dois laços de proximidade decidindo rotas para
+ * as mesmas pessoas.
+ */
+const voiceTelemetry = createVoiceTelemetry({ core: voiceCore });
+const voiceDiagnostics = createVoiceDiagnostics({ core: voiceCore, telemetry: voiceTelemetry });
+
+/**
+ * Liga o diagnóstico ao `admin-service`.
+ *
+ * A direção da injeção é o ponto: o `admin-service` NÃO importa o Voice Core.
+ * Ele recebe uma interface de leitura e três ações, e continua sem saber que o
+ * sistema de voz existe. É a mesma disciplina que `voice-staff-mute` mantém com
+ * a instância compartilhada — staff não depende de voz.
+ *
+ * Chamado no `initialize` do módulo de voz. Num servidor com
+ * `ENABLE_VOIP_SERVICE=false` isto nunca roda, e os comandos de voz da staff
+ * respondem "o sistema de voz nao esta ativo" — que é a verdade.
+ */
+function bindAdminDiagnostics() {
+  try {
+    require('./admin-service').bindVoiceDiagnostics(voiceDiagnostics);
+    console.log('[voip] Diagnóstico de voz disponível para a staff (/vozdiag, /vozdesconectar, /vozreconectar).');
+  } catch (err) {
+    // Um admin-service ausente não pode impedir a voz de subir.
+    console.warn(`[voip] Não consegui ligar o diagnóstico ao admin-service: ${err.message}`);
+  }
+}
+
 function commandDefs() {
   return [
     {
@@ -834,6 +913,9 @@ function commandDefs() {
 
 module.exports = {
   commandDefs,
+  bindAdminDiagnostics,
+  voiceTelemetry,
+  voiceDiagnostics,
   startVoipServer,
   stopVoipServer,
   getConnectedVoipActors,

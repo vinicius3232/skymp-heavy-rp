@@ -80,6 +80,8 @@ const DEFAULT_ROOM = 'skyvoice';
  * @property {number} tokenExpiresAt
  * @property {number} generation  quantas vezes este ator abriu sessão
  * @property {string|null} lastError
+ * @property {boolean} canPublish   permissão DURÁVEL de publicar (papel, staff mute)
+ * @property {boolean} canSubscribe permissão durável de assinar
  */
 
 /**
@@ -144,8 +146,26 @@ function createVoiceSessionService(deps = {}) {
    * parâmetro por onde o cliente informe identidade, sala ou permissão: os três
    * são derivados aqui.
    *
+   * ## `canPublish` é decisão de servidor, e por isso está aqui
+   *
+   * O token é a primeira camada de defesa contra alguém ser ouvido quando não
+   * deveria — e até esta etapa ela não era usada: todo token saía com
+   * `canPublish: true`, e o silêncio dependia inteiramente da camada de
+   * assinatura (`UpdateSubscriptions`). Isso é frágil de um jeito específico: o
+   * `livekit-gateway` **abre o circuito** quando o SFU falha, de propósito, para
+   * não derrubar o jogo. Com o circuito aberto, a camada de assinatura para de
+   * agir — e um jogador silenciado pela staff voltaria a ser ouvido por todo
+   * mundo na sala, sem que nada no servidor reclamasse.
+   *
+   * Negar `canPublish` no token fecha isso no lugar certo: o próprio SFU recusa
+   * a publicação, sem depender de o gamemode conseguir falar com ele.
+   *
+   * O que **não** entra aqui é PTT nem condição de personagem. Um token não pode
+   * mudar cinquenta vezes por segundo; ele carrega a permissão **durável** da
+   * sessão (papel e silêncio de staff), e o resto continua sendo rota.
+   *
    * @param {number} actorId
-   * @param {{characterId?: number|null, name?: string}} [opts]
+   * @param {{characterId?: number|null, name?: string, canPublish?: boolean, canSubscribe?: boolean}} [opts]
    * @returns {{ok: boolean, reason?: string, session: VoiceSession|null, token?: string, url?: string, evicted?: string|null}}
    */
   function open(actorId, opts = {}) {
@@ -216,7 +236,9 @@ function createVoiceSessionService(deps = {}) {
         apiSecret: config.apiSecret,
         room: config.room,
         identity: session.identity,
-        name: opts.name
+        name: opts.name,
+        canPublish: session.canPublish,
+        canSubscribe: session.canSubscribe
       });
     } catch (err) {
       // Emissão de token falhando é problema de configuração, não do jogo.
@@ -255,7 +277,13 @@ function createVoiceSessionService(deps = {}) {
       openedAt: now(),
       tokenExpiresAt: 0,
       generation,
-      lastError: null
+      lastError: null,
+      // Guardados na sessão, e não só passados ao emissor, porque o
+      // diagnóstico da staff precisa responder "por que esta pessoa não é
+      // ouvida?" sem decodificar um JWT. `!== false` e não `=== true`: quem não
+      // diz nada continua podendo falar e ouvir, que é o caso normal.
+      canPublish: opts.canPublish !== false,
+      canSubscribe: opts.canSubscribe !== false
     };
     sessions.set(actorId, session);
     if (sessionNonce) byIdentity.set(identity, actorId);
@@ -342,10 +370,16 @@ function createVoiceSessionService(deps = {}) {
    * que faz os outros participantes não verem uma chegada nova — e o que
    * preserva as assinaturas que já apontam para ela.
    *
+   * `grants` permite que a renovação **aperte ou solte** a permissão durável:
+   * uma reconexão de quem foi silenciado pela staff no meio da sessão precisa
+   * voltar sem `canPublish`, senão a reconexão seria a forma trivial de desfazer
+   * a punição. Omitir `grants` preserva o que a sessão já tinha.
+   *
    * @param {number} actorId
+   * @param {{canPublish?: boolean, canSubscribe?: boolean}} [grants]
    * @returns {{ok: boolean, reason?: string, token?: string, url?: string, session?: VoiceSession}}
    */
-  function renew(actorId) {
+  function renew(actorId, grants = {}) {
     const session = sessions.get(actorId);
     if (!session) return { ok: false, reason: 'sem sessão aberta' };
 
@@ -354,12 +388,17 @@ function createVoiceSessionService(deps = {}) {
       return { ok: false, reason: `LiveKit não configurado (falta: ${config.missing.join(', ')})`, session };
     }
 
+    if (grants.canPublish !== undefined) session.canPublish = grants.canPublish !== false;
+    if (grants.canSubscribe !== undefined) session.canSubscribe = grants.canSubscribe !== false;
+
     try {
       const token = tokenIssuer.mintAccessToken({
         apiKey: config.apiKey,
         apiSecret: config.apiSecret,
         room: session.room,
-        identity: session.identity
+        identity: session.identity,
+        canPublish: session.canPublish,
+        canSubscribe: session.canSubscribe
       });
       session.tokenExpiresAt = now() + (tokenIssuer.DEFAULT_TTL_SECONDS * 1000);
       session.state = CONNECTION_STATES.RECONNECTING;
