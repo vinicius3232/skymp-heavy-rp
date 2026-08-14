@@ -1,10 +1,16 @@
 # SkyVoice — LiveKit self-hosted, reproduzível
 #
-# ⚠️ NUNCA FOI EXECUTADO. Esta composição é derivada da documentação oficial do
-#    LiveKit e do spike que rodou `livekit-server 1.13.5` como binário solto
-#    nesta máquina (SKYVOICE_LIVEKIT_AUDIT.md §10). Nenhum `docker compose up`
-#    foi executado contra ela. Trate como ponto de partida verificável, não como
-#    configuração provada.
+# ⚠️ ESTA COMPOSIÇÃO NUNCA FOI EXECUTADA. Nenhum `docker compose up` rodou contra
+#    ela. Trate como ponto de partida verificável, não como configuração provada.
+#
+#    O que JÁ foi exercitado: o binário `livekit-server 1.13.5` (a mesma versão
+#    fixada abaixo) subiu nesta máquina, serviu dois participantes reais e
+#    respondeu `200 OK` no endpoint que o `healthcheck` abaixo usa. O contrato
+#    Twirp entre o gamemode e o SFU foi medido — `npm run verify:livekit`, 10/10.
+#    Ver SKYVOICE_SECURITY_AUDIT.md §SV-05.
+#
+#    O que NÃO foi: a composição em si, o TLS do Caddy, o TURN, a faixa UDP e o
+#    `network_mode: host`. Nada saiu de 127.0.0.1.
 #
 # Subir:      docker compose --env-file .env up -d
 # Conferir:   docker compose ps && curl -fsS http://127.0.0.1:7880/

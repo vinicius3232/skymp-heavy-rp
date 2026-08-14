@@ -26,7 +26,15 @@ que ela produziu. Etapa 4.
 
 ## 1. Achados
 
-Ordenados por gravidade. Os quatro primeiros foram **corrigidos nesta etapa**.
+Ordenados por gravidade.
+
+**Estado em 2026-08-14, depois da rodada contra um SFU real:** SV-01 a SV-05 e
+SV-07 corrigidos; SV-06 parcialmente mitigado (depende do lado C++); SV-08
+mitigado com limite declarado.
+
+O SV-05 foi **reclassificado de 🟡 para 🔴** quando deixou de ser leitura de
+código e virou medição — a correção mais importante desta rodada, e a que só um
+servidor real produziria.
 
 ### 🔴 SV-01 — O gateway do LiveKit nunca falou com o SFU. **CORRIGIDO**
 
@@ -171,26 +179,86 @@ alarme falso constante é um detector desligado.
 
 ---
 
-### 🟡 SV-05 — `UpdateSubscriptions` monta um corpo de formato duvidoso. **NÃO CORRIGIDO**
+### 🔴 SV-05 — `UpdateSubscriptions` recebia 200 e não assinava nada. **CORRIGIDO**
+
+**Reclassificado de 🟡 para 🔴 quando foi medido.** A suspeita da revisão
+anterior estava certa; a gravidade estava subestimada, e o motivo é o que este
+achado tem de mais útil.
+
+O corpo antigo era:
 
 ```js
 participant_tracks: bucket.subscribe.map((identity) => ({ participant_sid: identity }))
 ```
 
-Dois problemas visíveis por leitura da API do LiveKit:
+Contra um `livekit-server` 1.13.5 real ele responde **`HTTP 200`, corpo `{}` — e
+não assina nada.** Não é um erro que aparece: o circuito do gateway conta
+sucesso, a métrica conta `gateway.ok`, o painel de diagnóstico mostra
+`CONNECTED`. **Todos os indicadores ficariam verdes com a assinatura seletiva
+desligada**, e o LiveKit entregaria todas as faixas a todo mundo. O sintoma não
+seria "a voz quebrou"; seria a conta de banda do SFU, meses depois.
 
-1. o campo se chama `participant_sid` e recebe uma **identity**, que é outra
-   coisa (o SID é atribuído pelo servidor; a identity é escolhida por nós);
-2. `ParticipantTracks` tem também `track_sids`, ausente aqui.
+Era 🟡 sob a hipótese de que um corpo errado viraria erro. Ele não vira.
 
-**Por que não foi corrigido:** não há `livekit-server` nesta máquina para
-verificar o formato certo, e trocar o corpo por outro palpite não é melhor que o
-palpite atual — só move o erro. Este é o item 4 da §10.2 da Etapa 2 e continua
-sendo o mais provável de precisar de ajuste no primeiro contato com um SFU real.
+#### Como foi medido
 
-**Gravidade 🟡 e não 🔴** porque o gateway já garante o que o gamemode depende:
-não chamar à toa, não derrubar o jogo, abrir circuito. Um corpo recusado pelo SFU
-vira falha capturada, não incidente. **NÃO TESTADO.**
+A sonda testou **cinco** corpos e mediu **efeito** — o ouvinte passou a receber a
+faixa? — e não código HTTP. **Os cinco devolveram `HTTP 200`:**
+
+| corpo | efeito |
+|---|---|
+| `participant_tracks:[{participant_sid: <identity>}]` — o antigo | **nenhum** |
+| `participant_tracks:[{participant_sid: <SID>, track_sids:[…]}]` | assina |
+| `track_sids:[…]` no topo | assina |
+| idem, em camelCase | assina |
+| `participant_sid` **errado** + `track_sids` | **assina** |
+
+A última linha isola a causa: **quem decide é `track_sids`.** Com ele preenchido,
+o `participant_sid` nem é consultado — o que explica por que o corpo antigo,
+que não o preenchia, não fazia nada.
+
+#### A correção
+
+`track_sids` no topo, a forma mais curta das que funcionam. O preço é que o
+gamemode precisa saber o track SID, que é atribuído pelo SFU: o gateway ganhou um
+registro `identity → [trackSid]` alimentado por `ListParticipants` e recarregado
+**só quando aparece uma identidade desconhecida** — quando alguém entra na cena,
+não a cada tick.
+
+#### Um segundo achado, do mesmo tamanho
+
+`UpdateSubscriptions(subscribe:false)` **desassina de verdade**, mas o
+`@livekit/rtc-node` **não emite `TrackUnsubscribed`** quando quem desassina é o
+servidor. Medido pelos quadros, que é o que paga a conta de banda:
+
+```
+   assinado    : 300 quadros em 3 s
+   desassinado :   0 quadros em 3 s
+```
+
+Um teste escrito em cima do evento concluiria que o desassinar está quebrado e
+trocaria um sistema correto por um errado. Fica registrado como o tipo de
+evidência que este projeto não aceita — pelo mesmo motivo do controle de câmera
+da Etapa 1.
+
+#### Prova
+
+`npm run verify:livekit` — **10/10** contra `livekit-server 1.13.5`
+(SHA-256 `3ec7eaa7…a8906`, conferido contra o `checksums.txt` da release). Roda
+fora do `npm test` de propósito: exigir um SFU tornaria a suíte impossível numa
+máquina limpa.
+
+O script inclui um caso de **regressão** que manda o corpo antigo e exige que ele
+continue não assinando. Sem ele, alguém "simplificando" o gateway de volta para
+`participant_tracks` passaria em toda a suíte com `fetch` falso.
+
+**VERIFICADO.**
+
+> ⚠️ **Limite que continua valendo.** Assinatura seletiva só decide alguma coisa
+> se o cliente conectar com `autoSubscribe: false`. Com o padrão (`true`), o SFU
+> entrega tudo na entrada e estas chamadas ficam correndo atrás do próprio
+> servidor. **Nenhum cliente deste projeto fala LiveKit ainda** — a UI é só o
+> caminho legado. Quando falar, isto é requisito de conexão, não detalhe.
 
 ---
 
@@ -209,18 +277,36 @@ o helper à mão, fora do launcher, continua com microfone aberto.
 
 ---
 
-### 🟡 SV-07 — Silêncio de staff não persiste. **NÃO CORRIGIDO**
+### 🟡 SV-07 — Silêncio de staff não persistia. **CORRIGIDO**
 
-Herdado da Etapa 3. O registro vive na memória do processo; reiniciar devolve a
-voz de todo mundo. Persistir exige tabela, migration e uma decisão sobre
-expiração que ninguém tomou.
+Herdado da Etapa 3. O registro vivia na memória do processo, e reiniciar devolvia
+a voz de todo mundo. Desde que a punição passou a mexer no token (SV-02), o
+efeito era pior: um restart não só devolvia a voz como **reemitia tokens com
+`canPublish: true`**. Na prática, a forma mais barata de escapar de uma punição
+era esperar o próximo restart do servidor.
 
-Nesta etapa o impacto **aumentou**, e é honesto registrar: agora que a punição
-mexe no token (SV-02), um restart não só devolve a voz como reemite tokens com
-`canPublish: true`. O comportamento é o mesmo de antes; a superfície é maior.
+**`migration-v16-voice-staff-mute.sql`** — uma linha por personagem, com
+`muted_until` em epoch ms.
 
-`describe()` continua existindo para a staff listar quem está silenciado antes de
-reiniciar. É paliativo e está nomeado como tal.
+A decisão sobre expiração que estava em aberto: **conferida na leitura**, no SQL
+e em JS. Nunca por evento agendado — um job que expira punições precisa rodar, e
+um job que não rodou deixa alguém calado além da conta sem que ninguém perceba.
+Lendo, a punição expira sozinha mesmo com o servidor desligado no meio.
+
+**O banco nunca entra no caminho crítico.** A ordem é sempre: aplicar em memória
+→ notificar → gravar, sem `await`. Um MySQL lento atrasa a durabilidade da
+punição; não abre uma janela em que a staff manda calar e nada acontece. Banco
+fora do ar deixa a punição valendo nesta execução, com aviso no log — e não
+lança, porque uma exceção subindo de dentro de um comando de staff é o servidor
+de jogo caindo por causa do MySQL.
+
+Não há histórico nesta tabela: uma linha por personagem, substituída. O histórico
+de quem calou quem vive no `moderation_log`, que é onde ele é imutável. Duas
+versões da mesma verdade divergem.
+
+**VERIFICADO** — 9 casos novos em `voice-staff-mute.test.js`, incluindo o
+restart, o banco fora do ar, o `hydrate` que falha sem derrubar o boot, e o
+`unmute` que alcança o banco com a memória já limpa.
 
 ---
 
@@ -254,7 +340,7 @@ Os quinze itens pedidos.
 | 5 | **Character binding** | ✅ | `characterId` vem de `getActiveCharacterData`; não há caminho de cliente. **VERIFICADO** |
 | 6 | **Room permissions** | ✅ | `roomJoin`+`room` prendem a uma sala; `roomAdmin`/`roomCreate`/`roomList` negados explicitamente. **VERIFICADO** |
 | 7 | **Publish permissions** | ✅ | `canPublishSources: ['microphone']`; `canPublish` derivado de staff mute (SV-02). **VERIFICADO** |
-| 8 | **Subscribe permissions** | 🟡 | `canSubscribe` no token ✅; o controle por assinatura depende do SV-05. **PARCIAL** |
+| 8 | **Subscribe permissions** | ✅ | `canSubscribe` no token ✅; o controle por assinatura foi medido contra SFU real — assina, desassina, e o corpo antigo (que não fazia nada) tem teste de regressão (SV-05). **VERIFICADO** |
 | 9 | **Spoofing** | ✅ | Identidade bem formada que não emitimos não resolve. **VERIFICADO** |
 | 10 | **Replay** | 🟡 | Ticket legado é de uso único. Token LiveKit tem `jti` e TTL curto, mas o LiveKit **não** guarda `jti` — um token capturado vale até expirar. Mitigado pela identidade única (o replay derrubaria a sessão original, o que é detectável). **INFERIDO** |
 | 11 | **Unauthorized participants** | ✅ | `confirmConnected` recusa identidade desconhecida; `RemoveParticipant` existe e agora funciona (SV-01). **VERIFICADO** |
@@ -366,9 +452,19 @@ consome, e nenhuma delas vai para o servidor.
 | `voice-diagnostics.test.js` | 20 | os treze campos, as ações, e o que o painel **não** expõe |
 | `voice-telemetry.test.js` | 17 | as dez métricas, e nenhuma carrega identificador de pessoa |
 | `voice-dist.test.mjs` (launcher) | 34 | manifesto, hash, rollback, argumentos sem ticket, preferências |
+| `livekit-gateway.test.js` | 24 | circuito, agrupamento, e **o corpo do SV-05** (8 casos novos) |
+| `voice-staff-mute.test.js` | 19 | expiração, e **a persistência do SV-07** (9 casos novos) |
+| `verify-livekit-contract.mjs` | 10 | **contra um SFU real**; fora do `npm test` |
 
-**Suíte do gamemode: 1253 testes, 1253 passam, 0 falham.** `npm run typecheck`
-limpo. **VERIFICADO** (1135 antes desta etapa, **118 acrescentados**).
+**Suíte do gamemode: 1270 testes, 1270 passam, 0 falham.** `npm run typecheck`
+limpo. Launcher: 71/71, `tsc -b` limpo. **VERIFICADO.**
+
+**Dois testes existentes foram alterados**, e é honesto dizer por quê: ambos em
+`livekit-gateway.test.js`, e ambos travavam um comportamento que a medição contra
+o SFU real provou errado — o corpo `participant_tracks` e a forma como uma falha
+de rede se apresenta agora que há uma recarga de registro antes das assinaturas.
+Nenhum foi alterado para "passar": o antigo agora é caso de regressão em
+`verify-livekit-contract.mjs`.
 
 ---
 
@@ -377,14 +473,20 @@ limpo. **VERIFICADO** (1135 antes desta etapa, **118 acrescentados**).
 Sem exceção.
 
 1. **Qualquer coisa fora de `127.0.0.1`.** TLS, TURN, CGNAT, latência, perda.
-2. **`UpdateSubscriptions` contra um `livekit-server` real.** SV-05.
-3. **`CefPermissionHandler` compilado.** É desenho, não binário.
-4. **`getUserMedia` dentro da CEF do SkyMP.**
-5. **O lado C++ do `--pair`/`--control-port`.** O launcher gera e passa; o helper
-   não sabe ler.
-6. **A composição do `deploy/livekit/`.** Nenhum `docker compose up` foi
-   executado contra ela.
-7. **Um token sendo recusado por um SFU real** por causa do SV-05.
+   O SFU desta rodada rodou em loopback.
+2. **`CefPermissionHandler` compilado.** É desenho, não binário.
+3. **`getUserMedia` dentro da CEF do SkyMP.**
+4. **O lado C++ do `--pair`/`--control-port`.** O launcher gera, passa e desliga;
+   o helper não sabe ler.
+5. **A composição do `deploy/livekit/`.** Nenhum `docker compose up` foi
+   executado contra ela — o Docker Desktop desta máquina não sobe. O que foi
+   exercitado é o **binário** `livekit-server 1.13.5`, incluindo o mesmo
+   endpoint de health check que o compose usa (`GET /` → `200 OK`).
+6. **Um cliente do jogo falando LiveKit.** A UI é só o caminho legado; a
+   assinatura seletiva foi provada com dois clientes `@livekit/rtc-node`, não com
+   a CEF.
+7. **A fiação de voz do launcher em execução.** `main.ts` exige Electron: o que
+   há é typecheck limpo e a lógica pura coberta por 34 casos.
 
 ---
 

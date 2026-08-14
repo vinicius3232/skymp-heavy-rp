@@ -65,6 +65,7 @@ const professionService = require(path.join(gamemodeDir, 'profession-service'));
 const voipService   = require(path.join(gamemodeDir, 'voip-service'));
 const voiceEndpoint = require(path.join(gamemodeDir, 'core', 'voice', 'voice-endpoint'));
 const voiceSecurity = require(path.join(gamemodeDir, 'core', 'voice', 'voice-security'));
+const voiceStaffMute = require(path.join(gamemodeDir, 'core', 'voice', 'voice-staff-mute'));
 const soulService   = require(path.join(gamemodeDir, 'soul-service'));
 const nametagService = require(path.join(gamemodeDir, 'nametag-service'));
 const faunaCensus   = require(path.join(gamemodeDir, 'fauna-census'));
@@ -322,6 +323,26 @@ moduleRegistry.register({
     // de propósito: não faz sentido oferecer ferramenta de moderação de voz num
     // servidor cujo ambiente de voz não passou.
     voipService.bindAdminDiagnostics();
+
+    // Persistência do silêncio de staff (SV-07). Ligada aqui, e não na
+    // construção do módulo, porque a instância compartilhada precisa nascer sem
+    // banco para a suíte de testes rodar numa máquina sem MySQL.
+    //
+    // O `hydrate` roda ANTES de `startVoipServer`: um jogador que entrasse entre
+    // o servidor abrir e o registro carregar receberia token com
+    // `canPublish: true`, e a punição só valeria no recompute seguinte.
+    try {
+      voiceStaffMute.sharedVoiceStaffMute.setStore(voiceStaffMute.createMysqlStaffMuteStore());
+      const carga = await voiceStaffMute.sharedVoiceStaffMute.hydrate();
+      console.log(
+        carga.ok
+          ? `[voip] silêncio de staff: ${carga.loaded} punição(ões) ainda valendo`
+          : `[voip] ⚠️  silêncio de staff não carregou (${carga.reason}); punições desta execução não sobrevivem ao restart`
+      );
+    } catch (err) {
+      // Boot não cai por causa disto. Ver a mesma decisão dentro de `hydrate`.
+      console.warn(`[voip] ⚠️  persistência de silêncio indisponível: ${err && err.message}`);
+    }
 
     const voice = voiceEndpoint.describeBackend();
     console.log(

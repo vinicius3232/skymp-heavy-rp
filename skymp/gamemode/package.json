@@ -19,6 +19,8 @@
     "loadtest:voice": "node --expose-gc scripts/loadtest-voice.js",
     "//soak:voice": "Soak de 12k ciclos procurando participante/assinatura/estado obsoletos e heap crescendo. Sai 1 se vazar.",
     "soak:voice": "node --expose-gc scripts/soak-voice.js",
+    "//verify:livekit": "Contrato contra um livekit-server REAL. Mede efeito (o ouvinte recebeu a faixa?), nao codigo HTTP. Fora do npm test de proposito: exige SFU. Sai 2 se nao der para rodar.",
+    "verify:livekit": "node scripts/verify-livekit-contract.mjs",
     "//bench:voice": "Mede a latencia de proximidade do Voice Core contra o laco O(n^2) antigo. Sai 1 se a meta nao for atingida."
   },
   "keywords": [],
