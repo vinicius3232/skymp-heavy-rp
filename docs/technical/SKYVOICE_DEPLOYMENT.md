@@ -3,12 +3,22 @@
 **Data:** 2026-08-14
 **Escopo:** subir, operar e diagnosticar a voz em produção. Etapa 4.
 
-> ⚠️ **Nada deste documento foi executado.** Não há `livekit-server` nesta
-> máquina, nenhum `docker compose up` rodou contra `deploy/livekit/`, e nada do
-> projeto jamais saiu de `127.0.0.1`. O que existe aqui é uma configuração
-> **reproduzível e verificável**, derivada da documentação oficial e do spike da
-> Etapa 1 (que rodou o `livekit-server 1.13.5` como binário solto). Trate como
-> ponto de partida, não como configuração provada.
+> ⚠️ **Quase nada deste documento foi executado**, e o que foi está marcado.
+>
+> **Executado:** o binário `livekit-server 1.13.5` (SHA-256 `3ec7eaa7…a8906`,
+> conferido contra o `checksums.txt` da release) subiu nesta máquina, serviu dois
+> participantes reais, e respondeu `200 OK` no mesmo endpoint de health check que
+> o `docker-compose.yml` usa. O contrato Twirp entre o gamemode e o SFU foi
+> medido (`npm run verify:livekit`, 10/10) — ver `SKYVOICE_SECURITY_AUDIT.md`
+> §SV-05.
+>
+> **Não executado:** nenhum `docker compose up` rodou contra `deploy/livekit/` —
+> o Docker Desktop desta máquina não sobe. Nada saiu de `127.0.0.1`: TLS, TURN,
+> DNS, firewall e a faixa UDP continuam sendo configuração derivada da
+> documentação oficial, não configuração provada.
+>
+> Trate as seções de **TLS, TURN, DNS, firewall e portas** como ponto de partida
+> verificável. Trate **health checks** e o **contrato com o SFU** como medidos.
 
 ---
 
@@ -182,13 +192,21 @@ nenhum módulo de regra importa configuração de transporte.
 
 ## 8. Health checks
 
-| O quê | Como | Bom |
-|---|---|---|
-| SFU vivo | `curl -fsS http://127.0.0.1:7880/` | 200 |
-| TLS válido | `curl -fsS https://voz.exemplo.tld/` | 200, sem aviso de certificado |
-| Container | `docker compose ps` | `healthy` |
-| UDP alcançável | `nc -uzv <ip> 50000` de **fora** | aberto |
-| Gateway do gamemode | `voice_server_errors` e o `gatewayState` do diagnóstico | `CONNECTED` |
+| O quê | Como | Bom | Estado |
+|---|---|---|---|
+| SFU vivo | `curl -fsS http://127.0.0.1:7880/` | `200 OK` | **VERIFICADO** |
+| Contrato Twirp com o gamemode | `npm run verify:livekit` | 10/10 | **VERIFICADO** |
+| TLS válido | `curl -fsS https://voz.exemplo.tld/` | 200, sem aviso de certificado | NÃO TESTADO |
+| Container | `docker compose ps` | `healthy` | NÃO TESTADO |
+| UDP alcançável | `nc -uzv <ip> 50000` de **fora** | aberto | NÃO TESTADO |
+| Gateway do gamemode | `voice_server_errors` e o `gatewayState` do diagnóstico | `CONNECTED` | **VERIFICADO** |
+
+> ⚠️ **`CONNECTED` não basta como sinal de saúde da assinatura.** O SV-05 provou
+> que o SFU responde `HTTP 200` a um corpo de `UpdateSubscriptions` que não faz
+> nada — com o gateway em `CONNECTED`, `gateway.ok` subindo, e zero assinaturas
+> aplicadas. O health check que pega isso é o `verify:livekit`, que mede
+> **efeito** (o ouvinte recebeu quadros?) e não código HTTP. Rode-o depois de
+> qualquer atualização de versão do `livekit-server`.
 
 O healthcheck do compose bate no endpoint raiz do LiveKit — o mesmo que o
 `livekit-gateway` alcança. Checar outra coisa provaria que o container vive, não

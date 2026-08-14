@@ -22,12 +22,56 @@
  * injetado (`fetchImpl`), com `globalThis.fetch` como padrão — que existe no
  * Node moderno e não custa nada.
  *
- * A consequência honesta: **a serialização do corpo das chamadas de sala do
- * LiveKit (Twirp/protobuf-JSON) não foi verificada contra um servidor real
- * nesta etapa.** O que está travado por teste é o comportamento que o gamemode
- * depende — não chamar quando não mudou nada, não derrubar o jogo quando falha,
- * abrir o circuito depois de N falhas. Ver §"Estado de prova" no documento da
- * etapa.
+ * O corpo das chamadas de sala (Twirp/protobuf-JSON) **foi verificado contra o
+ * `livekit-server` 1.13.5 real** na Etapa 4 — ver `SKYVOICE_SECURITY_AUDIT.md`
+ * §SV-05. O que essa medição derrubou está registrado abaixo, porque é o tipo de
+ * erro que nenhum teste com `fetch` falso pega.
+ *
+ * ## O que `UpdateSubscriptions` realmente exige (medido, não deduzido)
+ *
+ * A versão anterior deste arquivo mandava:
+ *
+ * ```js
+ * participant_tracks: [{ participant_sid: <identity> }]
+ * ```
+ *
+ * O SFU responde **`HTTP 200` com corpo `{}`** a isso — e não assina nada. É o
+ * pior formato de falha possível: o circuito conta sucesso, a métrica conta
+ * `gateway.ok`, e o painel mostra um gateway saudável enquanto **nenhuma
+ * assinatura é aplicada**. Em produção isso não apareceria como "a voz quebrou";
+ * apareceria como a conta de banda do SFU, meses depois, porque sem assinatura
+ * seletiva o LiveKit entrega todas as faixas a todo mundo.
+ *
+ * A sonda testou cinco corpos contra o servidor real e mediu **efeito** (o
+ * ouvinte recebeu `TrackSubscribed`?), não código HTTP — os cinco devolveram 200:
+ *
+ * | corpo | efeito |
+ * |---|---|
+ * | `participant_tracks:[{participant_sid: identity}]` | **nenhum** |
+ * | `participant_tracks:[{participant_sid: SID, track_sids:[...]}]` | assina |
+ * | `track_sids:[...]` no topo | assina |
+ * | idem em camelCase | assina |
+ * | `participant_sid` **errado** + `track_sids` | **assina** |
+ *
+ * A última linha é a que ensina: **quem decide é `track_sids`.** Com ele
+ * preenchido, o `participant_sid` nem é olhado. Por isso este arquivo usa a forma
+ * de cima — `track_sids` no topo, sem `participant_tracks` — que é a mais curta
+ * das que funcionam e a única que não exige rastrear SID de participante.
+ *
+ * ## O preço: o gamemode precisa saber o track SID
+ *
+ * Track SID é atribuído pelo SFU, não por nós. O gamemode conhece `actorId` e
+ * deriva `identity`; a ponte `identity → trackSid` só existe no servidor de
+ * mídia. Daí o registro abaixo, alimentado por `ListParticipants` e recarregado
+ * **só quando aparece uma identidade desconhecida** — que é quando alguém entra
+ * na cena, não a cada tick.
+ *
+ * ## Limite que continua valendo
+ *
+ * Assinatura seletiva só decide alguma coisa se o cliente conectar com
+ * `autoSubscribe: false`. Com o padrão (`true`), o SFU entrega tudo no momento da
+ * entrada e estas chamadas ficam correndo atrás. **Nenhum cliente deste projeto
+ * fala LiveKit ainda**; quando falar, é requisito de conexão, não detalhe.
  *
  * ## Circuito, e por que ele existe
  *
@@ -103,6 +147,18 @@ function createVoiceLiveKitGateway(deps = {}) {
   let _consecutiveFailures = 0;
   let _openedAt = 0;
   let _lastError = null;
+
+  /**
+   * `identity → [trackSid]`, a ponte que só o SFU sabe construir.
+   *
+   * Só faixas de **microfone**. Uma faixa de vídeo aqui seria um bug em outro
+   * lugar (o token nega `canPublishSources` fora de `microphone`), e assinar uma
+   * por engano gastaria banda que este módulo existe para economizar.
+   *
+   * @type {Map<string, string[]>}
+   */
+  const _tracksByIdentity = new Map();
+  let _registryRefreshes = 0;
 
   /** O circuito está aberto (recusando chamadas) neste instante? */
   function circuitOpen() {
@@ -202,15 +258,57 @@ function createVoiceLiveKitGateway(deps = {}) {
         throw new Error(`${method} respondeu ${status}`);
       }
 
+      // O corpo só interessa para `ListParticipants`. Falha de parse não é falha
+      // de chamada: `UpdateSubscriptions` responde `{}` e um `{}` ilegível não
+      // muda o fato de o SFU ter aceitado.
+      let data = null;
+      if (typeof response.json === 'function') {
+        try { data = await response.json(); } catch { data = null; }
+      }
+
       _onSuccess();
       done();
       metrics.count('gateway.ok');
-      return { ok: true, skipped: false };
+      return { ok: true, skipped: false, data };
     } catch (err) {
       done();
       _onFailure(err);
       return { ok: false, skipped: false, reason: _lastError };
     }
+  }
+
+  /**
+   * Recarrega `identity → [trackSid]` a partir da verdade do SFU.
+   *
+   * Nunca rejeita, como tudo aqui. Se a chamada falhar, o registro fica como
+   * estava: uma assinatura que não sai é banda desperdiçada, e uma exceção aqui
+   * seria o servidor de jogo caindo — a troca não é próxima de justa.
+   */
+  async function refreshTrackRegistry() {
+    const result = await _call('ListParticipants', { room: resolveLiveKitConfig(env()).room });
+    if (!result.ok || !result.data || !Array.isArray(result.data.participants)) {
+      return { ok: false, known: _tracksByIdentity.size };
+    }
+
+    _tracksByIdentity.clear();
+    for (const participant of result.data.participants) {
+      if (!participant || typeof participant.identity !== 'string') continue;
+      const sids = [];
+      for (const track of (participant.tracks || [])) {
+        // `type: 'AUDIO'` e `source: 'MICROPHONE'` são o que o servidor devolve
+        // para a faixa que o nosso token permite publicar. Filtrar pelos dois é
+        // redundante de propósito: se um dia o token afrouxar, o desperdício não
+        // começa aqui em silêncio.
+        if (track && track.type === 'AUDIO' && track.source === 'MICROPHONE' && track.sid) {
+          sids.push(track.sid);
+        }
+      }
+      if (sids.length > 0) _tracksByIdentity.set(participant.identity, sids);
+    }
+
+    _registryRefreshes++;
+    metrics.count('gateway.trackRegistryRefresh');
+    return { ok: true, known: _tracksByIdentity.size };
   }
 
   /**
@@ -229,6 +327,24 @@ function createVoiceLiveKitGateway(deps = {}) {
       return { ok: true, calls: 0, skipped: true };
     }
 
+    // UMA recarga por lote, no máximo, e só se alguém que precisa ser ASSINADO
+    // for desconhecido. Quem vai ser desassinado e sumiu do registro já não tem
+    // assinatura no SFU — recarregar por causa dele seria uma ida à rede para
+    // descobrir que não há nada a fazer.
+    const precisaRecarregar = diff.subscribe.some((edge) => {
+      const identity = identityOf(edge.speaker);
+      return identity && !_tracksByIdentity.has(identity);
+    });
+    // Uma recarga que falha não é um lote vazio. Se o SFU não respondeu, o
+    // gamemode pediu assinaturas e NÃO conseguiu — devolver `ok: true` aqui
+    // faria o chamador registrar sucesso justamente no tick em que a voz parou
+    // de ser roteada, que é o mesmo engano que o SV-05 era.
+    let refreshFailed = false;
+    if (precisaRecarregar) {
+      const recarga = await refreshTrackRegistry();
+      refreshFailed = recarga.ok !== true;
+    }
+
     // Agrupado por OUVINTE porque `UpdateSubscriptions` é por participante: uma
     // chamada com dez faixas custa uma ida à rede; dez chamadas com uma faixa
     // custam dez. O agrupamento é a diferença entre um tick que faz uma chamada
@@ -244,14 +360,18 @@ function createVoiceLiveKitGateway(deps = {}) {
       return bucket;
     };
 
-    for (const edge of diff.subscribe) {
+    /** Quantas arestas morreram por falta de faixa conhecida — vira diagnóstico. */
+    let unresolved = 0;
+    const empurrar = (edge, alvo) => {
       const identity = identityOf(edge.speaker);
-      if (identity) bucketFor(edge.listener).subscribe.push(identity);
-    }
-    for (const edge of diff.unsubscribe) {
-      const identity = identityOf(edge.speaker);
-      if (identity) bucketFor(edge.listener).unsubscribe.push(identity);
-    }
+      if (!identity) return;
+      const sids = _tracksByIdentity.get(identity);
+      if (!sids || sids.length === 0) { unresolved++; return; }
+      bucketFor(edge.listener)[alvo].push(...sids);
+    };
+
+    for (const edge of diff.subscribe) empurrar(edge, 'subscribe');
+    for (const edge of diff.unsubscribe) empurrar(edge, 'unsubscribe');
 
     let calls = 0;
     let failures = 0;
@@ -259,30 +379,29 @@ function createVoiceLiveKitGateway(deps = {}) {
       const listenerIdentity = identityOf(listener);
       if (!listenerIdentity) continue;
 
-      if (bucket.subscribe.length > 0) {
+      for (const subscribe of [true, false]) {
+        const sids = subscribe ? bucket.subscribe : bucket.unsubscribe;
+        if (sids.length === 0) continue;
         calls++;
+        // `track_sids` no topo — a forma medida contra o SFU real. Ver o
+        // cabeçalho deste arquivo para as cinco variantes testadas e por que
+        // `participant_tracks` saiu.
         const result = await _call('UpdateSubscriptions', {
           room: resolveLiveKitConfig(env()).room,
           identity: listenerIdentity,
-          participant_tracks: bucket.subscribe.map((identity) => ({ participant_sid: identity })),
-          subscribe: true
-        });
-        if (!result.ok) failures++;
-      }
-      if (bucket.unsubscribe.length > 0) {
-        calls++;
-        const result = await _call('UpdateSubscriptions', {
-          room: resolveLiveKitConfig(env()).room,
-          identity: listenerIdentity,
-          participant_tracks: bucket.unsubscribe.map((identity) => ({ participant_sid: identity })),
-          subscribe: false
+          track_sids: sids,
+          subscribe
         });
         if (!result.ok) failures++;
       }
     }
 
+    if (unresolved > 0) metrics.count('gateway.unresolvedTracks', unresolved);
     metrics.count('gateway.subscriptionCalls', calls);
-    return { ok: failures === 0, calls, failures, skipped: false };
+    return {
+      ok: failures === 0 && !refreshFailed,
+      calls, failures, unresolved, refreshFailed, skipped: false
+    };
   }
 
   /**
@@ -296,6 +415,10 @@ function createVoiceLiveKitGateway(deps = {}) {
       room: resolveLiveKitConfig(env()).room,
       identity
     });
+    // Fora da sala, fora do registro. Manter a entrada faria o próximo lote
+    // mandar `track_sids` de uma faixa que não existe mais — e, pior, faria o
+    // gateway NÃO recarregar quando a pessoa voltasse com uma faixa nova.
+    _tracksByIdentity.delete(identity);
     if (result.ok) metrics.count('gateway.removeParticipant');
     return result;
   }
@@ -329,7 +452,9 @@ function createVoiceLiveKitGateway(deps = {}) {
       missing: config.missing,
       consecutiveFailures: _consecutiveFailures,
       lastError: _lastError,
-      circuitOpenUntil: _state === GATEWAY_STATES.FAILED ? _openedAt + cooldownMs : 0
+      circuitOpenUntil: _state === GATEWAY_STATES.FAILED ? _openedAt + cooldownMs : 0,
+      knownTrackIdentities: _tracksByIdentity.size,
+      trackRegistryRefreshes: _registryRefreshes
     };
   }
 
@@ -338,11 +463,15 @@ function createVoiceLiveKitGateway(deps = {}) {
     _consecutiveFailures = 0;
     _openedAt = 0;
     _lastError = null;
+    _tracksByIdentity.clear();
+    _registryRefreshes = 0;
   }
 
   return {
     applySubscriptionDiff, removeParticipant, mutePublishedTrack,
-    describe, reset,
+    refreshTrackRegistry, describe, reset,
+    /** Só para teste e diagnóstico: o que o gateway acha que existe no SFU. */
+    trackSidsFor(identity) { return _tracksByIdentity.get(identity) || null; },
     get state() { return _state; }
   };
 }

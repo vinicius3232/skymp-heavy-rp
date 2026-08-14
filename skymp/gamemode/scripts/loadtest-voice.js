@@ -259,8 +259,30 @@ async function rodar(n, cenario) {
   // se mede é o custo do gamemode, e um SFU que falhasse abriria o circuito e
   // esconderia justamente o trabalho de assinatura.
   let chamadasSfu = 0;
+
+  /**
+   * O que o SFU falso diz que existe na sala.
+   *
+   * Preenchido depois do `attach`, porque a identidade é emitida pelo Voice Core
+   * e não por este script. **Sem isto o teste de carga para de medir o que
+   * interessa:** o gateway resolve `identity → trackSid` por `ListParticipants`,
+   * e um SFU falso que não responde a essa chamada devolve registro vazio, toda
+   * aresta vira `unresolved` e **nenhuma chamada de assinatura sai**. O script
+   * continuaria imprimindo números — só que de um regime em que a assinatura
+   * seletiva não acontece.
+   *
+   * @type {Array<{identity: string, tracks: Array<{sid: string, type: string, source: string}>}>}
+   */
+  const participantesDoSfu = [];
+
   const gateway = createVoiceLiveKitGateway({
-    fetchImpl: async () => { chamadasSfu++; return { ok: true, status: 200 }; },
+    fetchImpl: async (url) => {
+      chamadasSfu++;
+      if (String(url).endsWith('/ListParticipants')) {
+        return { ok: true, status: 200, json: async () => ({ participants: participantesDoSfu }) };
+      }
+      return { ok: true, status: 200 };
+    },
     mintAdminToken,
     logger: { log() {}, warn() {}, error() {} }
   });
@@ -276,7 +298,14 @@ async function rodar(n, cenario) {
   // Todo mundo entra na cena de voz, pelo caminho LiveKit completo.
   for (const a of atores.values()) {
     const aberto = core.attach(a.actorId, { characterId: a.actorId & 0xffff });
-    if (aberto.session) core.sessions.confirmConnected(aberto.session.identity);
+    if (aberto.session) {
+      core.sessions.confirmConnected(aberto.session.identity);
+      // Cada pessoa na sala publica uma faixa de microfone, como no SFU real.
+      participantesDoSfu.push({
+        identity: aberto.session.identity,
+        tracks: [{ sid: `TR_${a.actorId}`, type: 'AUDIO', source: 'MICROPHONE' }]
+      });
+    }
   }
 
   // Quem fala. É o eixo do cenário D.
@@ -482,7 +511,7 @@ if (piorN200.length > 0) {
 
 console.log('  NÃO MEDIDO por este script, e portanto NÃO DECLARADO:');
 console.log('');
-console.log('    · CPU e RAM do LiveKit          — não há livekit-server nesta máquina');
+console.log('    · CPU e RAM do LiveKit          — o SFU aqui é um fetch falso, não um processo');
 console.log('    · Banda real                    — os números acima são conta, não medição');
 console.log('    · CPU do cliente, CPU da CEF    — exigem o jogo aberto');
 console.log('    · FPS                           — idem');

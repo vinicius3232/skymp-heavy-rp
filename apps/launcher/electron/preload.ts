@@ -24,6 +24,14 @@ const api = {
   installClientUpdate: (folderPath: string) => ipcRenderer.invoke('install-client-update', folderPath),
   checkModsUpdate: (folderPath: string) => ipcRenderer.invoke('check-mods-update', folderPath),
   installModsUpdate: (folderPath: string, force?: boolean) => ipcRenderer.invoke('install-mods-update', folderPath, force),
+  // Voz. Nenhum destes canais carrega ticket ou credencial de servidor: o
+  // ticket é emitido dentro do jogo e vai da CEF direto ao helper, sem passar
+  // pelo renderer do launcher.
+  checkVoiceUpdate: (folderPath: string) => ipcRenderer.invoke('check-voice-update', folderPath),
+  installVoiceUpdate: (folderPath: string) => ipcRenderer.invoke('install-voice-update', folderPath),
+  getVoicePreferences: () => ipcRenderer.invoke('get-voice-preferences'),
+  saveVoicePreferences: (prefs: any) => ipcRenderer.invoke('save-voice-preferences', prefs),
+  getVoiceStatus: (folderPath: string) => ipcRenderer.invoke('get-voice-status', folderPath),
   getRecentCrashes: () => ipcRenderer.invoke('get-recent-crashes'),
   reportRecentCrashes: () => ipcRenderer.invoke('report-recent-crashes'),
   onUpdateProgress: (callback: (value: any) => void) => {

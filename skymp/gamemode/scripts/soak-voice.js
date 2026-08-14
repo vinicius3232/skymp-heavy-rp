@@ -116,8 +116,35 @@ const random = rng(20260814);
 const atores = new Map();
 let proximoId = 0xff000000;
 
+/**
+ * A sala do SFU falso: `identity → trackSid`.
+ *
+ * Um `Map` vivo, e não uma lista montada uma vez, porque o soak tem
+ * rotatividade real — é justamente o regime em que um registro de faixas
+ * poderia vazar. Se o gateway guardasse identidades de quem já saiu, este mapa
+ * e o `describe().knownTrackIdentities` divergiriam, e a divergência é o que o
+ * soak procura.
+ *
+ * @type {Map<string, string>}
+ */
+const salaDoSfu = new Map();
+
 const gateway = createVoiceLiveKitGateway({
-  fetchImpl: async () => ({ ok: true, status: 200 }),
+  fetchImpl: async (url) => {
+    if (String(url).endsWith('/ListParticipants')) {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          participants: [...salaDoSfu].map(([identity, sid]) => ({
+            identity,
+            tracks: [{ sid, type: 'AUDIO', source: 'MICROPHONE' }]
+          }))
+        })
+      };
+    }
+    return { ok: true, status: 200 };
+  },
   mintAdminToken,
   logger: { log() {}, warn() {}, error() {} }
 });
@@ -152,13 +179,22 @@ function entrar() {
   };
   atores.set(actorId, a);
   const aberto = core.attach(actorId, { characterId: a.characterId });
-  if (aberto.session) core.sessions.confirmConnected(aberto.session.identity);
+  if (aberto.session) {
+    core.sessions.confirmConnected(aberto.session.identity);
+    a.identity = aberto.session.identity;
+    salaDoSfu.set(a.identity, `TR_${actorId}`);
+  }
   return a;
 }
 
 function sair(actorId) {
+  const a = atores.get(actorId);
   core.detach(actorId, 'logout');
   telemetria.forget(actorId);
+  // Sai da sala do SFU junto. Um participante que fica aqui depois do logout
+  // faria o gateway continuar achando que existe uma faixa dele — que é
+  // exatamente o "stale subscription" que este script procura.
+  if (a && a.identity) salaDoSfu.delete(a.identity);
   atores.delete(actorId);
 }
 
@@ -236,7 +272,15 @@ for (let ciclo = 0; ciclo < CICLOS; ciclo++) {
     const id = ids[Math.floor(random() * ids.length)];
     const a = atores.get(id);
     const aberto = core.attach(id, { characterId: a.characterId });
-    if (aberto.session) core.sessions.confirmConnected(aberto.session.identity);
+    if (aberto.session) {
+      core.sessions.confirmConnected(aberto.session.identity);
+      // Reconectar troca a identidade (nonce novo). A antiga precisa sair da
+      // sala do SFU, senão cada reconexão deixa um participante fantasma — e o
+      // soak roda 12 000 ciclos, então o fantasma vira vazamento medível.
+      if (a.identity && a.identity !== aberto.session.identity) salaDoSfu.delete(a.identity);
+      a.identity = aberto.session.identity;
+      salaDoSfu.set(a.identity, `TR_${id}`);
+    }
     reconexoes++;
   }
 
