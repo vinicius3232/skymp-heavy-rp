@@ -115,7 +115,10 @@ describe('voice-core — amostragem é a fronteira de autoridade', () => {
 
     const { samples } = core.sample();
     assert.strictEqual(samples.length, 1);
-    assert.deepStrictEqual(samples[0], { actorId: A, space: CELL, pos: [10, 20, 30] });
+    // `rot` entra na amostra na Etapa 3 e vem do MESMO `locationalData` — uma
+    // ida ao `mp`, dois campos. O fake não declara `rot`, e o núcleo cai em
+    // `[0, 0, 0]`: falta de orientação não pode custar a rota de ninguém.
+    assert.deepStrictEqual(samples[0], { actorId: A, space: CELL, pos: [10, 20, 30], rot: [0, 0, 0] });
   });
 
   it('leitura que falha REMOVE o ator da amostra em vez de reaproveitar a anterior', () => {
@@ -165,12 +168,12 @@ describe('voice-core — amostragem é a fronteira de autoridade', () => {
 
       globalThis.mp = {
         get: (id, prop) => (prop === 'locationalData' && id === A
-          ? { pos: [1, 2, 3], cellOrWorldDesc: CELL }
+          ? { pos: [1, 2, 3], rot: [0, 0, 90], cellOrWorldDesc: CELL }
           : null)
       };
 
       const { samples } = core.sample();
-      assert.deepStrictEqual(samples, [{ actorId: A, space: CELL, pos: [1, 2, 3] }],
+      assert.deepStrictEqual(samples, [{ actorId: A, space: CELL, pos: [1, 2, 3], rot: [0, 0, 90] }],
         'o global publicado depois tem que ser enxergado');
     } finally {
       if (anterior === undefined) delete globalThis.mp;

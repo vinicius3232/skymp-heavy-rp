@@ -3,17 +3,41 @@
  *
  * VoicePolicyEngine — as perguntas de permissão da voz, num lugar só.
  *
- * ## As três perguntas
+ * ## A equação que este módulo resolve
+ *
+ * ```
+ *   Locutor + Ouvinte + Estado do personagem + Estado do mundo  =  VoiceRoute
+ * ```
+ *
+ * `resolveRoute(listener, speaker)` é essa equação escrita como função, e a
+ * `VoiceRoute` que ela devolve tem exatamente os cinco campos que a etapa
+ * pediu: `allowed`, `gain`, `rangeModifier`, `effect`, `reason`.
+ *
+ *   - **Locutor / Ouvinte** → `VoiceStateService` (modo, mute, PTT, conexão)
+ *   - **Estado do personagem** → `voice-character-adapter` → `voice-conditions`
+ *   - **Estado do mundo** → `voice-occlusion` (célula, worldspace, portais)
+ *
+ * ## As perguntas
  *
  *   - `canSpeak(actorId)`      — esta pessoa pode transmitir agora?
- *   - `canHear(a, b, ctx)`     — este ouvinte recebe este locutor, e a que volume?
+ *   - `canListen(actorId)`     — esta pessoa está em condição de receber?
+ *   - `canHear(a, b)`          — este ouvinte recebe este locutor, e a que volume?
+ *   - `resolveRoute(a, b)`     — a mesma resposta, com os cinco campos
  *   - `pttDown/pttUp`          — o gesto do jogador vira (ou não) transmissão.
  *
- * Tudo o mais no Voice Core consulta estas três. O motivo de estarem juntas é
+ * Tudo o mais no Voice Core consulta estas. O motivo de estarem juntas é
  * que elas compartilham o estado que decide (`VoiceStateService`) e a tabela que
  * mede (`core/proximity-ranges.js`), e separá-las daria a cada chamador a
  * chance de responder por conta própria — que é como um servidor autoritativo
  * vira um servidor que concorda com o cliente na maioria das vezes.
+ *
+ * ## Onde NÃO existe `if (dead)`
+ *
+ * Em lugar nenhum deste arquivo, e é o ponto. Morto, inconsciente, abatido,
+ * amordaçado e silenciado pela staff entram por **uma** porta —
+ * `profileOf(actorId)` — e saem como quatro números e um nome de efeito. A
+ * tabela que os produz é `voice-conditions.js`; a tradução do personagem real é
+ * `voice-character-adapter.js`. Acrescentar uma condição nova não toca aqui.
  *
  * ## PTT é a segurança, mute local é conforto
  *
@@ -46,6 +70,9 @@
 const { VOICE_RANGES } = require('../proximity-ranges');
 const { CONNECTION_STATES, VOICE_MODES, DEFAULT_VOICE_MODE } = require('./voice-state');
 const { nullMetrics } = require('./voice-metrics');
+const { composeProfile, neutralProfile, conditionProfiles, VOICE_EFFECTS, EFFECT_STRENGTH } = require('./voice-conditions');
+const { nullCharacterAdapter } = require('./voice-character-adapter');
+const { createVoiceOcclusion } = require('./voice-occlusion');
 
 /**
  * Volume a partir da distância e do alcance. Queda linear, corte em `maxRange`.
@@ -107,17 +134,83 @@ function sameSpace(a, b) {
  * @param {Record<string, number>} [deps.ranges]  padrão: VOICE_RANGES
  * @param {ReturnType<typeof import('./voice-metrics').createVoiceMetrics>} [deps.metrics]
  * @param {boolean} [deps.pttRequired] padrão: true — PTT é o padrão do servidor
+ * @param {ReturnType<typeof import('./voice-character-adapter').createVoiceCharacterAdapter>} [deps.conditions]
+ * @param {ReturnType<typeof import('./voice-occlusion').createVoiceOcclusion>} [deps.occlusion]
+ * @param {Record<string, any>} [deps.conditionProfiles]
  */
 function createVoicePolicyEngine(deps) {
   const {
     state,
     ranges = VOICE_RANGES,
     metrics = nullMetrics(),
-    pttRequired = true
+    pttRequired = true,
+    // O adapter NULO é o padrão de propósito. O real puxa
+    // `core/character-state`, que puxa `../database`; um teste de alcance de
+    // sussurro não deve precisar de MySQL para rodar. Quem quer as condições
+    // reais é o `voice-core`, e ele as injeta.
+    conditions = nullCharacterAdapter(),
+    occlusion = createVoiceOcclusion({ metrics })
   } = deps || {};
 
   if (!state || typeof state.get !== 'function') {
     throw new Error('[voice-policy] VoiceStateService ausente');
+  }
+
+  /**
+   * Tabela de perfis por condição, resolvida uma vez por engine.
+   *
+   * Lida na construção e não por chamada porque ela vem do `server-options`,
+   * que é imutável enquanto o servidor roda. Ler por par seria um
+   * `serverOptions.get` por par por tick, para devolver o mesmo número.
+   */
+  const profileTable = deps.conditionProfiles || conditionProfiles();
+
+  /**
+   * Cache de perfil composto, válido só DENTRO de um ciclo de recompute.
+   *
+   * `null` significa "sem ciclo aberto": toda leitura vai à fonte. É o modo em
+   * que o relay opera, e é o certo lá — entre um recompute e o quadro seguinte
+   * a pessoa pode ter morrido, e servir um perfil de 150 ms atrás faria um
+   * cadáver terminar a frase.
+   *
+   * Dentro de um ciclo o cache existe porque `conditionsOf` consulta dois
+   * `Map` e compõe um objeto, e sem ele isso aconteceria uma vez por PAR — na
+   * topologia densa, 39.800 vezes por tick para 200 respostas distintas.
+   *
+   * @type {Map<number, import('./voice-conditions').VoiceConditionProfile & {conditions: string[]}>|null}
+   */
+  let _profileCache = null;
+
+  /** Abre um ciclo de recompute: perfis passam a ser cacheados. */
+  function beginCycle() {
+    _profileCache = new Map();
+  }
+
+  /** Fecha o ciclo. Depois disto toda leitura volta a ir à fonte. */
+  function endCycle() {
+    _profileCache = null;
+  }
+
+  /**
+   * O perfil de voz de um ator: o que as condições do personagem dele fazem
+   * com a voz. **A única porta por onde morte, desmaio, mordaça e silêncio de
+   * staff entram nesta política.**
+   *
+   * @param {number} actorId
+   * @returns {import('./voice-conditions').VoiceConditionProfile & {conditions: string[]}}
+   */
+  function profileOf(actorId) {
+    if (_profileCache) {
+      const cached = _profileCache.get(actorId);
+      if (cached) return cached;
+    }
+    const s = state.get(actorId);
+    const active = s ? conditions.conditionsOf(s.characterId) : [];
+    const profile = active.length === 0
+      ? neutralProfile()
+      : composeProfile(active, profileTable);
+    if (_profileCache) _profileCache.set(actorId, profile);
+    return profile;
   }
 
   /**
@@ -143,7 +236,7 @@ function createVoicePolicyEngine(deps) {
    * log de recusa quer saber a causa raiz, e a primeira recusa é a que aparece.
    *
    * @param {number} actorId
-   * @returns {{ok: boolean, reason?: string}}
+   * @returns {{ok: boolean, reason?: string, conditions?: string[]}}
    */
   function canSpeak(actorId) {
     const s = state.get(actorId);
@@ -154,6 +247,15 @@ function createVoicePolicyEngine(deps) {
     }
     if (s.muted) return { ok: false, reason: 'mutado' };
     if (pttRequired && !s.transmitting) return { ok: false, reason: 'PTT solto' };
+    // A condição do PERSONAGEM vem por último entre as recusas porque é a mais
+    // externa ao transporte: "você está morto" só é a explicação útil depois de
+    // haver sessão, personagem e conexão. Antes disso o motivo verdadeiro é
+    // outro, e mostrar a morte esconderia um problema de conexão.
+    const profile = profileOf(actorId);
+    if (!profile.canSpeak) {
+      metrics.count('policy.rejected.condition');
+      return { ok: false, reason: profile.reason || 'condição do personagem', conditions: profile.conditions };
+    }
     return { ok: true };
   }
 
@@ -166,13 +268,21 @@ function createVoicePolicyEngine(deps) {
    * ele tenha uma sessão viva para onde mandar áudio.
    *
    * @param {number} actorId
-   * @returns {{ok: boolean, reason?: string}}
+   * @returns {{ok: boolean, reason?: string, conditions?: string[]}}
    */
   function canListen(actorId) {
     const s = state.get(actorId);
     if (!s) return { ok: false, reason: 'sem sessão de voz' };
     if (s.connection !== CONNECTION_STATES.CONNECTED) {
       return { ok: false, reason: `conexão em ${s.connection}` };
+    }
+    // Ouvir tem condição própria e ela é MAIS FROUXA que a de falar: silenciado
+    // pela staff continua ouvindo (senão a punição vira desconexão disfarçada),
+    // e amordaçado ouve normalmente (a mordaça está na boca). Quem não ouve é
+    // quem está inconsciente ou morto — e mesmo isso é configurável.
+    const profile = profileOf(actorId);
+    if (!profile.canHear) {
+      return { ok: false, reason: profile.reason || 'condição do personagem', conditions: profile.conditions };
     }
     return { ok: true };
   }
@@ -186,13 +296,15 @@ function createVoicePolicyEngine(deps) {
    *
    * @param {{actorId: number, space: string|null, pos: number[]}} listener
    * @param {{actorId: number, space: string|null, pos: number[]}} speaker
-   * @returns {{ok: boolean, volume: number, distance: number, reason?: string}}
+   * @returns {{ok: boolean, volume: number, distance: number, effect: string, reason?: string}}
    */
   function canHear(listener, speaker) {
-    if (!listener || !speaker) return { ok: false, volume: 0, distance: Infinity, reason: 'amostra ausente' };
+    if (!listener || !speaker) {
+      return { ok: false, volume: 0, distance: Infinity, effect: VOICE_EFFECTS.NONE, reason: 'amostra ausente' };
+    }
     if (listener.actorId === speaker.actorId) {
       // Ouvir a própria voz de volta é eco, não voz.
-      return { ok: false, volume: 0, distance: 0, reason: 'mesmo ator' };
+      return { ok: false, volume: 0, distance: 0, effect: VOICE_EFFECTS.NONE, reason: 'mesmo ator' };
     }
 
     // O veredito sai do MESMO código que o recompute usa. O que segue depois
@@ -200,27 +312,38 @@ function createVoicePolicyEngine(deps) {
     const probe = audienceProbe(speaker);
     if (probe) {
       const volume = probe(listener);
-      if (volume > 0) return { ok: true, volume, distance: probe.distance };
+      if (volume > 0) {
+        return { ok: true, volume, distance: probe.distance, effect: probe.effect };
+      }
     }
 
     // Caminho frio: descobrir por quê. A ordem vai da recusa mais estrutural
     // para a mais volátil, porque quem lê um log quer a causa raiz.
     const listening = canListen(listener.actorId);
-    if (!listening.ok) return { ok: false, volume: 0, distance: Infinity, reason: listening.reason };
+    if (!listening.ok) {
+      return { ok: false, volume: 0, distance: Infinity, effect: VOICE_EFFECTS.NONE, reason: listening.reason };
+    }
 
     const speaking = canSpeak(speaker.actorId);
-    if (!speaking.ok) return { ok: false, volume: 0, distance: Infinity, reason: speaking.reason };
+    if (!speaking.ok) {
+      return { ok: false, volume: 0, distance: Infinity, effect: VOICE_EFFECTS.NONE, reason: speaking.reason };
+    }
 
-    if (!sameSpace(listener.space, speaker.space)) {
-      return { ok: false, volume: 0, distance: Infinity, reason: 'célula/worldspace incompatível' };
+    // O mesmo veredito de ambiente que o caminho quente usa. Chamar
+    // `sameSpace` aqui teria a resposta certa hoje e mentiria no dia em que um
+    // provedor de portal existisse: o par estaria audível pelo caminho quente
+    // e "incompatível" pelo frio — dois motivos para o mesmo par.
+    const environment = occlusion.between(listener.space, speaker.space);
+    if (environment.blocked) {
+      return { ok: false, volume: 0, distance: Infinity, effect: VOICE_EFFECTS.NONE, reason: environment.reason };
     }
 
     const distance = distance3D(listener.pos, speaker.pos);
     if (!Number.isFinite(distance)) {
-      return { ok: false, volume: 0, distance: Infinity, reason: 'posição inválida' };
+      return { ok: false, volume: 0, distance: Infinity, effect: VOICE_EFFECTS.NONE, reason: 'posição inválida' };
     }
 
-    return { ok: false, volume: 0, distance, reason: 'fora de alcance' };
+    return { ok: false, volume: 0, distance, effect: VOICE_EFFECTS.NONE, reason: 'fora de alcance' };
   }
 
   /**
@@ -252,16 +375,28 @@ function createVoicePolicyEngine(deps) {
    * regra, duas superfícies.
    *
    * @param {{actorId: number, space: string|null, pos: number[]}} speaker
-   * @returns {((listener: {actorId: number, space: string|null, pos: number[]}) => number) & {distance: number, range: number} | null}
+   * @returns {((listener: {actorId: number, space: string|null, pos: number[]}) => number) & {distance: number, range: number, baseRange: number, rangeModifier: number, gainModifier: number, effect: string} | null}
    *   `null` se o locutor não pode falar; senão, uma função que devolve o
-   *   volume (0 = não ouve) e publica a distância medida em `.distance`.
+   *   volume (0 = não ouve) e publica a distância medida em `.distance` e o
+   *   efeito do par em `.effect`.
    */
   function audienceProbe(speaker) {
     if (!speaker || !Array.isArray(speaker.pos)) return null;
     if (!canSpeak(speaker.actorId).ok) return null;
 
     const speakerState = state.get(speaker.actorId);
-    const range = rangeFor(speakerState ? speakerState.voiceMode : DEFAULT_VOICE_MODE);
+    const profile = profileOf(speaker.actorId);
+    const baseRange = rangeFor(speakerState ? speakerState.voiceMode : DEFAULT_VOICE_MODE);
+
+    // O alcance efetivo é o do modo VEZES o modificador da condição. Um
+    // sussurro amordaçado alcança 30% de um sussurro, não 30% de um grito — a
+    // mordaça abafa o que a pessoa escolheu dizer, não redefine o que ela é.
+    const range = baseRange * profile.rangeModifier;
+    if (!(range > 0)) return null;
+
+    const gainModifier = profile.gainModifier;
+    if (!(gainModifier > 0)) return null;
+
     const rangeSquared = range * range;
     const space = speaker.space;
     const [sx, sy, sz] = speaker.pos;
@@ -282,11 +417,33 @@ function createVoicePolicyEngine(deps) {
       const ls = state.get(listener.actorId);
       if (!ls || ls.connection !== CONNECTION_STATES.CONNECTED) return 0;
 
-      // `sameSpace` em linha: chamada de função por par, nesta escala, aparece
-      // no perfil. A regra é a mesma — desconhecido de um lado não separa.
-      if (space && listener.space && space !== listener.space) {
-        metrics.count('policy.rejected.space');
-        return 0;
+      // Condição do OUVINTE. Um `Map.get` cacheado por ciclo — sem isto, um
+      // inconsciente continuaria recebendo rota e o cliente dele tocaria a
+      // cena inteira enquanto a UI diz que ele está apagado.
+      const listenerProfile = profileOf(listener.actorId);
+      if (!listenerProfile.canHear) return 0;
+
+      // Ambiente. No nível 1 isto é a mesma comparação de string que estava
+      // aqui em linha antes — a diferença é que agora um provedor de portal
+      // pode transformar "parede" em "porta fechada", sem tocar nesta função.
+      // `space === listener.space` é conferido antes para que o caso comum
+      // (mesma célula) não pague sequer uma chamada.
+      let occlusionGain = 1;
+      let occlusionRangeSquared = rangeSquared;
+      let pairEffect = profile.effect;
+
+      if (space !== listener.space) {
+        const verdict = occlusion.between(listener.space, space);
+        if (verdict.blocked) {
+          metrics.count('policy.rejected.space');
+          return 0;
+        }
+        occlusionGain = verdict.gainModifier;
+        const occludedRange = range * verdict.rangeModifier;
+        occlusionRangeSquared = occludedRange * occludedRange;
+        if (EFFECT_STRENGTH[verdict.effect] > EFFECT_STRENGTH[pairEffect]) {
+          pairEffect = verdict.effect;
+        }
       }
 
       const lp = listener.pos;
@@ -296,15 +453,65 @@ function createVoicePolicyEngine(deps) {
       const d2 = dx * dx + dy * dy + dz * dz;
       // Comparar quadrados evita a raiz para todo mundo que está fora — que,
       // fora da taverna, é quase todo mundo.
-      if (!(d2 < rangeSquared)) return 0;
+      if (!(d2 < occlusionRangeSquared)) return 0;
 
       const distance = Math.sqrt(d2);
       probe.distance = distance;
-      return 1 - (distance / range);
+      probe.effect = pairEffect;
+      return (1 - (distance / range)) * gainModifier * occlusionGain;
     });
     probe.distance = 0;
     probe.range = range;
+    probe.baseRange = baseRange;
+    probe.rangeModifier = profile.rangeModifier;
+    probe.gainModifier = gainModifier;
+    /** Efeito do último par avaliado. Mesma justificativa de `.distance`. */
+    probe.effect = profile.effect;
     return probe;
+  }
+
+  /**
+   * A equação da etapa, escrita como função:
+   *
+   * ```
+   *   Locutor + Ouvinte + Estado do personagem + Estado do mundo = VoiceRoute
+   * ```
+   *
+   * É a superfície **legível** — a que os testes e o diagnóstico usam. O
+   * recompute continua usando `audienceProbe`, e as duas não podem divergir
+   * porque esta é implementada sobre aquela: o veredito e o ganho saem do
+   * mesmo código, e o que muda é só quanto contexto se devolve junto.
+   *
+   * @param {{actorId: number, space: string|null, pos: number[]}} listener
+   * @param {{actorId: number, space: string|null, pos: number[]}} speaker
+   * @returns {{allowed: boolean, gain: number, rangeModifier: number, gainModifier: number,
+   *           effect: string, reason: string|null, distance: number, range: number,
+   *           conditions: {speaker: string[], listener: string[]}}}
+   */
+  function resolveRoute(listener, speaker) {
+    const speakerProfile = speaker ? profileOf(speaker.actorId) : neutralProfile();
+    const listenerProfile = listener ? profileOf(listener.actorId) : neutralProfile();
+    const conditionsOut = {
+      speaker: speakerProfile.conditions,
+      listener: listenerProfile.conditions
+    };
+
+    const verdict = canHear(listener, speaker);
+    const range = rangeFor(
+      state.get(speaker && speaker.actorId) ? state.get(speaker.actorId).voiceMode : DEFAULT_VOICE_MODE
+    ) * speakerProfile.rangeModifier;
+
+    return {
+      allowed: verdict.ok,
+      gain: verdict.volume,
+      rangeModifier: speakerProfile.rangeModifier,
+      gainModifier: speakerProfile.gainModifier,
+      effect: verdict.ok ? verdict.effect : VOICE_EFFECTS.NONE,
+      reason: verdict.ok ? null : (verdict.reason ?? null),
+      distance: verdict.distance,
+      range,
+      conditions: conditionsOut
+    };
   }
 
   /**
@@ -378,9 +585,11 @@ function createVoicePolicyEngine(deps) {
   }
 
   return {
-    canSpeak, canListen, canHear, audienceProbe, pttDown, pttUp,
+    canSpeak, canListen, canHear, audienceProbe, resolveRoute, pttDown, pttUp,
     requestVoiceMode, requestMute,
+    profileOf, beginCycle, endCycle,
     rangeFor, maxRange, volumeAt, sameSpace,
+    occlusion, conditions,
     pttRequired
   };
 }

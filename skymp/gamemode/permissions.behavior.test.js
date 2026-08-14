@@ -231,6 +231,20 @@ const ACOES = {
     // pior do que não revelar: a única coisa que torna o poder aceitável é
     // alguém conseguir provar depois que ele foi usado, contra quem e por quem.
     aconteceu: () => auditEntries.some(e => e.action === 'identity:staff_reveal')
+  },
+  voiceMute: {
+    permissao: 'voice_mute',
+    invoca: () => admin.voiceMute(STAFF_ACTOR_ID, TARGET_ACTOR_ID, 'gritando por cima da cena'),
+    // A sonda é a auditoria e não o registro de silêncio: o registro vive em
+    // memória e some no restart, então ele não prova que a ação foi RASTREADA.
+    // O que torna uma punição aceitável é alguém conseguir mostrar depois quem
+    // a aplicou — mesma razão do `revealIdentity` acima.
+    aconteceu: () => auditEntries.some(e => e.action === 'staff:voice_mute')
+  },
+  voiceUnmute: {
+    permissao: 'voice_mute',
+    invoca: () => admin.voiceUnmute(STAFF_ACTOR_ID, TARGET_ACTOR_ID),
+    aconteceu: () => auditEntries.some(e => e.action === 'staff:voice_unmute')
   }
 };
 
@@ -252,7 +266,14 @@ const MATRIZ = {
   // Nem furar o anonimato de um jogador: é a única ação de staff que não tem
   // como ser desfeita — nem por outro comando, nem pelo tempo. Ver o bloco de
   // ROLE_PERMISSIONS em admin-service.js.
-  revealIdentity:  { nenhum: false, moderator: false, admin: true,  owner: true }
+  revealIdentity:  { nenhum: false, moderator: false, admin: true,  owner: true },
+  // Silenciar a voz é ferramenta de linha de frente, ao lado do kick: quem
+  // modera uma cena precisa poder calar quem grita por cima de todo mundo sem
+  // ter que escolher entre não fazer nada e expulsar. É reversível pelo mesmo
+  // cargo, não escreve no mundo e não persiste — as três coisas que separam
+  // isto de `retireCharacter` e `revealIdentity`.
+  voiceMute:       { nenhum: false, moderator: true,  admin: true,  owner: true },
+  voiceUnmute:     { nenhum: false, moderator: true,  admin: true,  owner: true }
 };
 
 const CARGOS = ['nenhum', 'moderator', 'admin', 'owner'];

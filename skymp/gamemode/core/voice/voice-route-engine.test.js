@@ -64,7 +64,12 @@ describe('voice-route-engine — rotas', () => {
     assert.strictEqual(audiencia.length, 1);
     assert.strictEqual(audiencia[0].actorId, B);
     assert.ok(audiencia[0].volume > 0);
-    assert.strictEqual(r.routesByListener.get(B).get(A), audiencia[0].volume);
+    // Desde a Etapa 3 a rota é um objeto: volume, efeito e direção. As duas
+    // saídas continuam obrigadas a concordar no volume — elas nascem da mesma
+    // chamada de `probe`, e um desacordo aqui significaria que o relay e a UI
+    // estão aplicando ganhos diferentes para o mesmo par.
+    assert.strictEqual(r.routesByListener.get(B).get(A).volume, audiencia[0].volume);
+    assert.strictEqual(r.routesByListener.get(B).get(A).effect, audiencia[0].effect);
   });
 
   it('quem está com o PTT solto não gera rota nenhuma', () => {
@@ -146,7 +151,7 @@ describe('voice-route-engine — entrar e sair de alcance', () => {
     const perto = ctx.routes.recompute([em(A, 0), em(B, 200)]);
     const longe = ctx.routes.recompute([em(A, 0), em(B, 800)]);
 
-    assert.ok(perto.routesByListener.get(B).get(A) > longe.routesByListener.get(B).get(A));
+    assert.ok(perto.routesByListener.get(B).get(A).volume > longe.routesByListener.get(B).get(A).volume);
     assert.strictEqual(perto.diff.subscribe.length + perto.diff.unsubscribe.length, 0);
     assert.strictEqual(longe.diff.subscribe.length + longe.diff.unsubscribe.length, 0);
   });
