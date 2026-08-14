@@ -63,6 +63,7 @@ const playerPanel   = require(path.join(gamemodeDir, 'player-panel-service'));
 const deathService  = require(path.join(gamemodeDir, 'death-service'));
 const voipService   = require(path.join(gamemodeDir, 'voip-service'));
 const voiceEndpoint = require(path.join(gamemodeDir, 'core', 'voice', 'voice-endpoint'));
+const voiceSecurity = require(path.join(gamemodeDir, 'core', 'voice', 'voice-security'));
 const soulService   = require(path.join(gamemodeDir, 'soul-service'));
 const nametagService = require(path.join(gamemodeDir, 'nametag-service'));
 const faunaCensus   = require(path.join(gamemodeDir, 'fauna-census'));
@@ -286,6 +287,25 @@ moduleRegistry.register({
   dependencies: [],
   commands: voipService.commandDefs(),
   initialize: async () => {
+    // Antes de qualquer coisa: o ambiente é defensável?
+    //
+    // Roda aqui, dentro do `initialize` do módulo de voz, e não no topo do
+    // arquivo, porque só faz sentido auditar a voz de um servidor que ligou a
+    // voz. Um servidor com `ENABLE_VOIP_SERVICE=false` não deve ser impedido de
+    // subir por causa de um `LIVEKIT_URL` mal preenchido que ele nunca vai usar.
+    //
+    // Achado FATAL derruba o processo. Isso NÃO contradiz "voz falhando não
+    // derruba o jogo": aquela regra é de runtime, e esta é de boot. Um SFU fora
+    // do ar não pode tirar o servidor do ar; um ambiente que vaza credencial não
+    // deve chegar a ter runtime. Subir com o aviso no log seria subir, e ninguém
+    // lê o log de boot de um servidor que subiu.
+    voiceSecurity.enforceAtBoot();
+
+    // Diagnóstico e ações de voz para a staff. Depois da auditoria de ambiente,
+    // de propósito: não faz sentido oferecer ferramenta de moderação de voz num
+    // servidor cujo ambiente de voz não passou.
+    voipService.bindAdminDiagnostics();
+
     const voice = voiceEndpoint.describeBackend();
     console.log(
       `[voip] VOICE_BACKEND=${voice.backend} ` +

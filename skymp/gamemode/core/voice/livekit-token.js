@@ -194,6 +194,111 @@ function mintAccessToken(opts) {
 }
 
 /**
+ * Vida útil do token de operador, em segundos.
+ *
+ * Muito mais curto que o do jogador (360 s) porque ele é usado de outro jeito:
+ * o token de jogador precisa sobreviver ao handshake e a uma reconexão
+ * imediata; o de operador é gerado **por chamada**, viaja num header e morre.
+ * Sessenta segundos cobrem folga de relógio e o timeout de 2 s do gateway com
+ * margem de sobra, e reduzem a janela em que um token de operador capturado num
+ * log de proxy ainda vale alguma coisa.
+ */
+const ADMIN_TTL_SECONDS = 60;
+
+/**
+ * Token de OPERADOR, para a API de sala do LiveKit (Twirp).
+ *
+ * ## Por que ele precisa existir, e o que a ausência dele causava
+ *
+ * O `livekit-gateway` exige um `mintAdminToken` para autenticar
+ * `UpdateSubscriptions`, `RemoveParticipant` e `MutePublishedTrack`. Até aqui
+ * **nenhum código de produção passava um** — só os testes passavam um lambda.
+ * O efeito era silencioso e completo: toda chamada de servidor caía no
+ * `if (typeof mintAdminToken !== 'function')` e voltava
+ * `{ok: false, skipped: true}`. Sem erro, sem falha de circuito, sem métrica de
+ * falha — o gateway parecia saudável e não falava com o SFU **nunca**.
+ *
+ * O sintoma que isso produziria em produção é o pior tipo: a economia de banda
+ * por assinatura seletiva simplesmente não aconteceria, e o servidor entregaria
+ * todas as faixas a todo mundo. O jogo continuaria correto (o ganho é do
+ * `proximity_update`), a conta de banda não.
+ *
+ * ## Por que ele NÃO é o token do jogador com um campo a mais
+ *
+ * Este token é a chave do cofre; o do jogador é o crachá de visitante. As
+ * diferenças são deliberadas:
+ *
+ * | | Jogador | Operador |
+ * |---|---|---|
+ * | `roomJoin` | `true` | **`false`** — operador não entra na sala |
+ * | `roomAdmin` | `false` | **`true`** — é o direito que a API de sala exige |
+ * | `canPublish` / `canSubscribe` | conforme o papel | **`false`** — não há mídia aqui |
+ * | TTL | 360 s | **60 s** |
+ * | Quem recebe | o cliente | **ninguém** — fica no header, entre dois processos |
+ *
+ * `roomJoin: false` é o que impede este token de virar uma entrada na cena de
+ * voz caso vaze: ele autoriza administrar a sala pela API, não estar dentro
+ * dela. E `canPublish: false` garante que, mesmo se alguém conseguisse usá-lo
+ * para entrar, não haveria voz saindo dele.
+ *
+ * @param {object} opts
+ * @param {string} opts.apiKey
+ * @param {string} opts.apiSecret  nunca sai deste processo
+ * @param {string} opts.room       a sala que este token pode administrar
+ * @param {number} [opts.ttlSeconds]
+ * @param {number} [opts.now]
+ * @returns {string} JWT compacto
+ */
+function mintAdminToken(opts) {
+  const {
+    apiKey,
+    apiSecret,
+    room,
+    ttlSeconds = ADMIN_TTL_SECONDS,
+    now = Date.now()
+  } = opts || {};
+
+  if (!apiKey) throw new Error('[livekit-token] apiKey ausente');
+  if (!apiSecret) throw new Error('[livekit-token] apiSecret ausente');
+  // `room` obrigatório mesmo sendo um token de admin: um `roomAdmin` sem sala
+  // administra TODAS as salas do servidor. Hoje há uma só, o que faria a
+  // diferença passar despercebida — e é exatamente por isso que ela é travada
+  // agora, enquanto o erro é barato.
+  if (!room) throw new Error('[livekit-token] room ausente');
+
+  const nowSec = Math.floor(now / 1000);
+
+  const header = { alg: 'HS256', typ: 'JWT' };
+  const payload = {
+    iss: apiKey,
+    // Um `sub` que não é identidade de participante nenhuma. Precisa existir
+    // (o LiveKit rejeita token sem `sub`) e precisa NÃO colidir com
+    // `actor-<id>-<nonce>`, senão um token de operador seria confundível com o
+    // de um jogador na leitura de um log.
+    sub: 'skyvoice-server',
+    nbf: nowSec - CLOCK_SKEW_SECONDS,
+    exp: nowSec + ttlSeconds,
+    jti: crypto.randomBytes(8).toString('hex'),
+    video: {
+      roomJoin: false,
+      roomAdmin: true,
+      room,
+      canPublish: false,
+      canSubscribe: false,
+      canPublishData: false,
+      roomCreate: false,
+      roomList: false,
+      roomRecord: false
+    }
+  };
+
+  const signingInput = `${_b64url(JSON.stringify(header))}.${_b64url(JSON.stringify(payload))}`;
+  const signature = crypto.createHmac('sha256', apiSecret).update(signingInput).digest();
+
+  return `${signingInput}.${_b64url(signature)}`;
+}
+
+/**
  * Decodifica o payload de um token SEM verificar a assinatura.
  *
  * Para teste e diagnóstico apenas. Não use isto para tomar decisão de
@@ -218,8 +323,10 @@ function decodePayloadUnsafe(token) {
 
 module.exports = {
   mintAccessToken,
+  mintAdminToken,
   participantIdentity,
   actorIdFromIdentity,
   decodePayloadUnsafe,
-  DEFAULT_TTL_SECONDS
+  DEFAULT_TTL_SECONDS,
+  ADMIN_TTL_SECONDS
 };

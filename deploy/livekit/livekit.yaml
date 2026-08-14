@@ -1,0 +1,115 @@
+# SkyVoice — configuração do livekit-server
+#
+# ⚠️ NUNCA FOI EXECUTADA. Derivada da documentação oficial. O que FOI executado
+#    nesta máquina foi o `livekit-server 1.13.5` com configuração padrão, no
+#    spike da Etapa 1 — não esta.
+#
+# ⚠️ NÃO ESCREVA CHAVES AQUI. Este arquivo está em git. As chaves entram por
+#    `LIVEKIT_KEYS` no ambiente (ver docker-compose.yml).
+
+port: 7880
+
+# ── Mídia ────────────────────────────────────────────────────────────────────
+rtc:
+  # TCP como alternativa para quem está atrás de firewall que bloqueia UDP.
+  # Não é o caminho preferido — TCP para mídia em tempo real sofre com
+  # head-of-line blocking, e uma perda vira travada em vez de chiado — mas é a
+  # diferença entre "voz ruim" e "voz nenhuma" para quem joga de rede
+  # corporativa.
+  tcp_port: 7881
+
+  # A faixa UDP da mídia.
+  #
+  # 50000–60000 é o padrão do LiveKit. Cada participante publicando usa uma
+  # porta; 10.000 portas cobrem folgadamente as ~200 pessoas que este projeto
+  # mira, com margem para churn de reconexão.
+  #
+  # Estreitar a faixa é tentador (menos regra de firewall) e é a forma mais
+  # provável de descobrir, numa noite de evento, que o servidor parou de aceitar
+  # publicação nova.
+  port_range_start: 50000
+  port_range_end: 60000
+
+  # `use_external_ip: true` faz o SFU descobrir o IP público por STUN e anunciá-lo
+  # nos candidatos ICE. Obrigatório em qualquer nuvem: sem isto ele anuncia o IP
+  # privado da VPC, e nenhum cliente da internet consegue conectar.
+  #
+  # Numa máquina com IP público na própria interface, pode ser `false`.
+  use_external_ip: true
+
+# ── TURN ─────────────────────────────────────────────────────────────────────
+#
+# TURN não é opcional aqui, e a razão é o público deste projeto: jogador
+# residencial brasileiro, boa parte atrás de CGNAT. Dois jogadores em CGNAT não
+# fecham conexão direta, e sem TURN eles simplesmente não se ouvem — com o
+# servidor reportando tudo saudável.
+#
+# O relay atual (WebSocket PCM) resolvia isso **por acidente**: todo áudio passava
+# pelo servidor, então nunca houve conexão direta a falhar. Trocar para SFU sem
+# TURN seria trocar um acidente que funcionava por um desenho que não funciona.
+turn:
+  enabled: true
+
+  # 5349 é a porta padrão de TURN sobre TLS. Ela é a que atravessa firewall
+  # corporativo, porque parece HTTPS para um inspetor de pacote.
+  tls_port: 5349
+
+  # UDP puro, mais barato quando o firewall permite.
+  udp_port: 3478
+
+  # O domínio precisa bater com o certificado. Um TURN com nome errado no
+  # certificado falha no handshake TLS e o sintoma é "alguns jogadores não se
+  # ouvem" — os que precisavam de relay.
+  domain: turn.exemplo.tld
+
+  # Com o Caddy na frente terminando TLS, o LiveKit recebe o certificado por
+  # `external_tls: true`. Sem proxy, aponte cert_file/key_file aqui.
+  external_tls: true
+
+# ── Sala ─────────────────────────────────────────────────────────────────────
+room:
+  # Sem criação automática: TODA sala nasce de um token emitido pelo gamemode,
+  # que é a autoridade. Com `auto_create: true`, um token válido para uma sala
+  # inexistente a criaria — e uma sala fora do controle do gamemode é uma cena de
+  # voz que o SkyMP não sabe que existe e não modera.
+  auto_create: false
+
+  # Sala vazia é destruída. Um servidor que acumula salas vazias acumula estado
+  # que ninguém limpa.
+  empty_timeout: 300
+
+  # Codec de voz. Opus mono com DTX (não transmite silêncio) e RED (redundância
+  # contra perda) — os dois ligados por padrão no LiveKit para mono.
+  max_participants: 0   # 0 = sem teto no SFU; quem limita é a whitelist do jogo
+
+# ── Log ──────────────────────────────────────────────────────────────────────
+logging:
+  level: info
+  # `json: true` para quem tem coletor. Em texto é mais fácil de ler no
+  # `docker compose logs` durante um incidente, que é quando alguém lê log de SFU.
+  json: false
+
+  # ⚠️ NUNCA suba isto para `debug` em produção com jogadores.
+  #
+  # O nível `debug` do LiveKit registra eventos por faixa e por participante. Ele
+  # não grava áudio — o LiveKit não faz isso sem gravação explicitamente
+  # configurada —, mas produz um registro detalhado de **quem estava publicando
+  # para quem e quando**, que é um registro de conversas por metadado. A política
+  # de privacidade deste projeto não o permite fora de uma janela de depuração
+  # declarada.
+
+# ── Gravação ─────────────────────────────────────────────────────────────────
+#
+# NÃO EXISTE, e a ausência é deliberada.
+#
+# O LiveKit suporta gravação através do serviço **Egress**, que é um componente
+# SEPARADO: ele não está nesta composição, não é instalado, e não é alcançável.
+# Sem Egress rodando, nenhum token e nenhuma configuração deste arquivo consegue
+# iniciar uma gravação.
+#
+# `roomRecord: false` no token do jogador é a segunda camada (ver
+# `core/voice/livekit-token.js`). As duas juntas são o que torna "não gravamos
+# voz" uma propriedade da instalação, e não uma promessa.
+#
+# Se alguém um dia acrescentar Egress aqui, terá que apagar este comentário — e
+# esse é o ponto de ele existir.

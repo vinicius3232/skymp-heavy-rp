@@ -170,6 +170,25 @@ Module._load = function (request, parent, isMain) {
 
 const admin = require('./admin-service');
 
+// O diagnóstico de voz é injetado no boot pelo `voip-service`. Aqui entra um
+// duplo, porque o que este arquivo mede é **permissão e rastro**, não o
+// comportamento da voz — que tem os testes dele em `core/voice/`.
+//
+// Sem a injeção, as três ações de voz responderiam "voz não disponível" e não
+// gerariam audit log; a matriz passaria a testar um servidor sem voz, que é
+// exatamente o cenário em que uma escalação de privilégio não apareceria.
+admin.bindVoiceDiagnostics({
+  forActor: () => ({
+    actorId: TARGET_ACTOR_ID, voiceConnected: true, reconnectState: 'CONNECTED',
+    voiceMode: 'normal', staffMuted: false, canSpeakNow: true, reason: null
+  }),
+  overview: () => ({}),
+  roster: () => [],
+  disconnect: () => ({ ok: true, action: 'voice_disconnect', identity: 'actor-1-aaaa' }),
+  forceReconnect: () => ({ ok: true, action: 'voice_force_reconnect', transport: 'livekit' }),
+  summaryLine: () => 'connected=true state=CONNECTED'
+});
+
 // O mock fica instalado pelo arquivo inteiro, de propósito: `giveItemAdmin`
 // faz `require('./core/transaction-service')` **dentro** da função, então
 // restaurar o loader aqui deixaria o handler alcançar o banco de verdade.
@@ -245,6 +264,29 @@ const ACOES = {
     permissao: 'voice_mute',
     invoca: () => admin.voiceUnmute(STAFF_ACTOR_ID, TARGET_ACTOR_ID),
     aconteceu: () => auditEntries.some(e => e.action === 'staff:voice_unmute')
+  },
+
+  // As três ações de ciclo de vida da voz. A sonda de todas é a auditoria, pelo
+  // mesmo motivo do `voiceMute`: o efeito (sessão fechada, token reemitido) vive
+  // em memória e some no restart, então ele não prova que a ação foi RASTREADA.
+  //
+  // `voiceDiagnose` é a mais fácil de subestimar: é só uma consulta. Mas
+  // consultar o estado de voz de um jogador é olhar o que ele está fazendo, e num
+  // sistema de moderação quem olhou também é registro.
+  voiceDiagnose: {
+    permissao: 'voice_mute',
+    invoca: () => admin.voiceDiagnose(STAFF_ACTOR_ID, TARGET_ACTOR_ID),
+    aconteceu: () => auditEntries.some(e => e.action === 'staff:voice_diagnostics')
+  },
+  voiceDisconnect: {
+    permissao: 'voice_mute',
+    invoca: () => admin.voiceDisconnect(STAFF_ACTOR_ID, TARGET_ACTOR_ID, 'cliente de voz travado'),
+    aconteceu: () => auditEntries.some(e => e.action === 'staff:voice_disconnect')
+  },
+  voiceForceReconnect: {
+    permissao: 'voice_mute',
+    invoca: () => admin.voiceForceReconnect(STAFF_ACTOR_ID, TARGET_ACTOR_ID),
+    aconteceu: () => auditEntries.some(e => e.action === 'staff:voice_force_reconnect')
   }
 };
 
@@ -273,7 +315,13 @@ const MATRIZ = {
   // cargo, não escreve no mundo e não persiste — as três coisas que separam
   // isto de `retireCharacter` e `revealIdentity`.
   voiceMute:       { nenhum: false, moderator: true,  admin: true,  owner: true },
-  voiceUnmute:     { nenhum: false, moderator: true,  admin: true,  owner: true }
+  voiceUnmute:     { nenhum: false, moderator: true,  admin: true,  owner: true },
+  // As três de ciclo de vida ficam no mesmo cargo que o silêncio, e não no do
+  // kick, porque mexem no TRANSPORTE de voz e nunca na presença no jogo. Quem
+  // pode calar pode destravar; expulsar é outra conversa.
+  voiceDiagnose:       { nenhum: false, moderator: true,  admin: true,  owner: true },
+  voiceDisconnect:     { nenhum: false, moderator: true,  admin: true,  owner: true },
+  voiceForceReconnect: { nenhum: false, moderator: true,  admin: true,  owner: true }
 };
 
 const CARGOS = ['nenhum', 'moderator', 'admin', 'owner'];
@@ -332,7 +380,11 @@ describe('a matriz cobre todo comando de staff que existe', () => {
   it('nenhum handler exportado ficou de fora da matriz', () => {
     // Handlers que não são comandos de staff sujeitos a permissão.
     const naoSaoComandos = new Set([
-      'registerStaffRole', 'removeStaffRole', 'hasPermission', 'getRole', 'auditLog'
+      'registerStaffRole', 'removeStaffRole', 'hasPermission', 'getRole', 'auditLog',
+      // Injeção de dependência feita no boot pelo `voip-service`, não comando.
+      // O `admin-service` não importa o Voice Core — a direção da dependência é
+      // staff ← voz, nunca o contrário.
+      'bindVoiceDiagnostics'
     ]);
 
     const exportados = Object.keys(admin).filter(

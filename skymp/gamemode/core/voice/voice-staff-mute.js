@@ -47,6 +47,50 @@ function createVoiceStaffMute(deps = {}) {
   const muted = new Map();
 
   /**
+   * Quem quer saber que uma punição mudou.
+   *
+   * Existe para resolver um problema de DIREÇÃO de dependência. Quando a staff
+   * cala alguém que já está conectado, o token daquela sessão precisa ser
+   * reemitido sem `canPublish` — senão a punição só vale a partir da próxima
+   * conexão, e a única defesa até lá é a camada de assinatura, que é justamente
+   * a que o circuito aberto do gateway desliga.
+   *
+   * A forma óbvia seria o `admin-service` chamar o Voice Core depois de calar.
+   * Isso poria o sistema de staff dependendo do sistema de voz — a direção
+   * errada, e a mesma que este módulo existe para evitar (ver a instância
+   * compartilhada no fim do arquivo). Com observador, quem se interessa é quem
+   * se inscreve: o Voice Core assina, o `admin-service` continua sem saber que
+   * ele existe.
+   *
+   * @type {Array<(characterId: number, muted: boolean) => void>}
+   */
+  const observers = [];
+
+  /**
+   * @param {(characterId: number, muted: boolean) => void} fn
+   * @returns {() => void} cancela a inscrição
+   */
+  function onChange(fn) {
+    observers.push(fn);
+    return () => {
+      const i = observers.indexOf(fn);
+      if (i >= 0) observers.splice(i, 1);
+    };
+  }
+
+  function _notify(characterId, isMutedNow) {
+    for (const fn of observers) {
+      try {
+        fn(characterId, isMutedNow);
+      } catch {
+        // Um observador que lança não pode impedir a punição de ser aplicada.
+        // O registro já está no Map antes desta linha; o que falha aqui é o
+        // efeito colateral (reemitir token), e a rota continua cortando.
+      }
+    }
+  }
+
+  /**
    * Silencia um personagem.
    *
    * @param {number} characterId
@@ -66,12 +110,18 @@ function createVoiceStaffMute(deps = {}) {
     };
     const changed = !muted.has(characterId);
     muted.set(characterId, entry);
+    // Notifica mesmo quando `changed` é falso: recalar alguém já calado com
+    // duração nova é uma mudança de punição, e o token precisa refletir a que
+    // vale agora.
+    _notify(characterId, true);
     return { ok: true, changed, entry };
   }
 
   /** @param {number} characterId */
   function unmute(characterId) {
-    return { ok: true, changed: muted.delete(characterId) };
+    const changed = muted.delete(characterId);
+    if (changed) _notify(characterId, false);
+    return { ok: true, changed };
   }
 
   /**
@@ -116,7 +166,7 @@ function createVoiceStaffMute(deps = {}) {
     return describe().length;
   }
 
-  return { mute, unmute, isMuted, get, describe, clear, size };
+  return { mute, unmute, isMuted, get, describe, clear, size, onChange };
 }
 
 /**

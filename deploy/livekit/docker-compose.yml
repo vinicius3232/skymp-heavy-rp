@@ -1,0 +1,91 @@
+# SkyVoice — LiveKit self-hosted, reproduzível
+#
+# ⚠️ NUNCA FOI EXECUTADO. Esta composição é derivada da documentação oficial do
+#    LiveKit e do spike que rodou `livekit-server 1.13.5` como binário solto
+#    nesta máquina (SKYVOICE_LIVEKIT_AUDIT.md §10). Nenhum `docker compose up`
+#    foi executado contra ela. Trate como ponto de partida verificável, não como
+#    configuração provada.
+#
+# Subir:      docker compose --env-file .env up -d
+# Conferir:   docker compose ps && curl -fsS http://127.0.0.1:7880/
+# Logs:       docker compose logs -f livekit
+# Derrubar:   docker compose down
+#
+# Ver docs/technical/SKYVOICE_DEPLOYMENT.md para DNS, TLS, firewall e portas.
+
+services:
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # O SFU
+  # ───────────────────────────────────────────────────────────────────────────
+  livekit:
+    image: livekit/livekit-server:v1.13.5
+    # Tag fixa, nunca `latest`. Um `latest` faz o SFU trocar de versão num
+    # `docker compose pull` de rotina, e a versão do SFU é metade do contrato de
+    # `UpdateSubscriptions` que o gamemode fala.
+    restart: unless-stopped
+    command: --config /etc/livekit/livekit.yaml
+
+    # `network_mode: host` e não portas mapeadas.
+    #
+    # Este é o ponto onde a maioria dos deploys de SFU quebra. A mídia usa uma
+    # faixa de ~10.000 portas UDP; mapeá-las uma a uma faz o Docker criar 10.000
+    # regras de userland proxy, e o resultado prático é consumo absurdo de
+    # memória e latência somada em cada pacote de voz. Com `host`, o
+    # `livekit-server` fala com a placa de rede direto.
+    #
+    # O custo é que ele passa a ver todas as interfaces do host — por isso o
+    # firewall da §Firewall do documento de deployment não é opcional.
+    network_mode: host
+
+    volumes:
+      - ./livekit.yaml:/etc/livekit/livekit.yaml:ro
+    environment:
+      # As chaves entram por ambiente e NUNCA no YAML versionado. O
+      # `livekit.yaml` deste diretório está em git; um `keys:` com valor real
+      # dentro dele seria o secret no repositório.
+      LIVEKIT_KEYS: "${LIVEKIT_API_KEY}: ${LIVEKIT_API_SECRET}"
+
+    healthcheck:
+      # O endpoint raiz do LiveKit responde em HTTP quando o SFU está pronto.
+      # É o mesmo que o `livekit-gateway` do gamemode alcança — checar outra
+      # coisa provaria que o container vive, não que a voz funciona.
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:7880/"]
+      interval: 15s
+      timeout: 5s
+      retries: 4
+      start_period: 20s
+
+    logging:
+      driver: json-file
+      options:
+        # Sem teto, o log de um SFU com 200 pessoas enche o disco do servidor de
+        # jogo — e um disco cheio derruba o MySQL antes de derrubar a voz.
+        max-size: "20m"
+        max-file: "5"
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # TLS
+  # ───────────────────────────────────────────────────────────────────────────
+  #
+  # O `livekit-server` sabe terminar TLS sozinho, e mesmo assim há um proxy aqui.
+  # O motivo é renovação: com Caddy, o certificado se renova sem reiniciar o SFU,
+  # e reiniciar o SFU derruba a voz de todo mundo que está na sala. Um certificado
+  # vence a cada 90 dias; uma queda de voz a cada 90 dias é evitável.
+  #
+  # Se preferir TLS no próprio LiveKit, remova este serviço e preencha a seção
+  # `turn.cert_file`/`key_file` do livekit.yaml — e aceite o restart trimestral.
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - livekit
+
+volumes:
+  caddy_data:
+  caddy_config:
