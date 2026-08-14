@@ -41,6 +41,8 @@
  */
 
 const { nullMetrics } = require('./voice-metrics');
+const { directionFor, quantizeDirection } = require('./voice-spatial');
+const { VOICE_EFFECTS } = require('./voice-conditions');
 
 /** A única faixa lógica de voz que existe. Ver o cabeçalho. */
 const LOCAL_TRACK = 'voice.local';
@@ -51,6 +53,8 @@ const LOCAL_TRACK = 'voice.local';
  * @property {number} listener
  * @property {number} volume
  * @property {number} distance
+ * @property {string} effect
+ * @property {[number, number, number]} dir  direção da fonte no referencial do ouvinte
  */
 
 /**
@@ -59,9 +63,10 @@ const LOCAL_TRACK = 'voice.local';
  * @param {ReturnType<typeof import('./voice-policy').createVoicePolicyEngine>} deps.policy
  * @param {ReturnType<typeof import('./voice-spatial-index').createVoiceSpatialIndex>} deps.index
  * @param {ReturnType<typeof import('./voice-metrics').createVoiceMetrics>} [deps.metrics]
+ * @param {boolean} [deps.spatial] calcular direção por rota. Padrão: ligado.
  */
 function createVoiceRouteEngine(deps) {
-  const { state, policy, index, metrics = nullMetrics() } = deps || {};
+  const { state, policy, index, metrics = nullMetrics(), spatial = true } = deps || {};
   if (!state || !policy || !index) throw new Error('[voice-route-engine] dependências ausentes (state, policy, index)');
 
   /**
@@ -93,9 +98,24 @@ function createVoiceRouteEngine(deps) {
 
     index.rebuild(samples);
 
-    /** @type {Map<number, {actorId: number, volume: number, distance: number}[]>} */
+    // Abre o ciclo: dentro dele o perfil de condição de cada ator (morto,
+    // amordaçado, silenciado) é resolvido UMA vez, não uma por par. Fechado no
+    // `finally` para que uma exceção no meio do recompute não deixe o cache
+    // aberto — um cache de condição que sobrevive ao ciclo é um cadáver
+    // terminando a frase no ciclo seguinte.
+    if (typeof policy.beginCycle === 'function') policy.beginCycle();
+    try {
+      return recomputeInCycle(samples, opts, done);
+    } finally {
+      if (typeof policy.endCycle === 'function') policy.endCycle();
+    }
+  }
+
+  /** @param {import('./voice-spatial-index').VoiceSample[]} samples */
+  function recomputeInCycle(samples, opts, done) {
+    /** @type {Map<number, {actorId: number, volume: number, distance: number, effect: string}[]>} */
     const audienceBySpeaker = new Map();
-    /** @type {Map<number, Map<number, number>>} */
+    /** @type {Map<number, Map<number, {volume: number, effect: string, dir: number[]}>>} */
     const routesByListener = new Map();
     /** @type {Map<number, Set<number>>} */
     const nextSubscriptions = new Map();
@@ -124,20 +144,32 @@ function createVoiceRouteEngine(deps) {
         const volume = probe(listener);
         if (volume <= 0) return;
         const distance = probe.distance;
+        // Lido IMEDIATAMENTE depois da chamada, como `.distance`: os dois são
+        // campos mutáveis do closure e valem para o último par avaliado.
+        const effect = probe.effect;
 
         let audience = audienceBySpeaker.get(speaker.actorId);
         if (!audience) {
           audience = [];
           audienceBySpeaker.set(speaker.actorId, audience);
         }
-        audience.push({ actorId: listener.actorId, volume, distance });
+        audience.push({ actorId: listener.actorId, volume, distance, effect });
 
         let routes = routesByListener.get(listener.actorId);
         if (!routes) {
           routes = new Map();
           routesByListener.set(listener.actorId, routes);
         }
-        routes.set(speaker.actorId, volume);
+        // A direção é calculada por ROTA, não por par candidato: só quem de
+        // fato ouve alguém paga o seno e o cosseno. Numa cena espalhada isso é
+        // a diferença entre 149 contas e 39.800.
+        routes.set(speaker.actorId, {
+          volume,
+          effect,
+          dir: spatial
+            ? quantizeDirection(directionFor(listener.pos, listener.rot, speaker.pos))
+            : null
+        });
 
         let subs = nextSubscriptions.get(listener.actorId);
         if (!subs) {

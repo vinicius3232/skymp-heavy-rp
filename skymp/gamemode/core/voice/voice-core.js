@@ -65,6 +65,12 @@ const { createVoiceSpatialIndex } = require('./voice-spatial-index');
 const { createVoiceRouteEngine } = require('./voice-route-engine');
 const { createVoiceSessionService } = require('./voice-session');
 const { createVoiceLiveKitGateway } = require('./livekit-gateway');
+const { createVoiceCharacterAdapter } = require('./voice-character-adapter');
+const { createVoiceOcclusion } = require('./voice-occlusion');
+const { createVoiceSpeakingState } = require('./voice-speaking-state');
+const { createVoiceSpeechAnimation } = require('./voice-speech-animation');
+const { effectSettings } = require('./voice-conditions');
+const serverOptions = require('../server-options');
 
 /**
  * Intervalo do tick espacial.
@@ -112,6 +118,11 @@ const DEFAULT_MIN_CRITICAL_INTERVAL_MS = 20;
  * @param {any} [deps.routes]
  * @param {any} [deps.sessions]
  * @param {any} [deps.gateway]
+ * @param {any} [deps.conditions] adapter para os estados reais do personagem
+ * @param {any} [deps.occlusion]
+ * @param {any} [deps.speaking]
+ * @param {any} [deps.speechAnimation]
+ * @param {boolean} [deps.spatial]
  */
 function createVoiceCore(deps = {}) {
   const {
@@ -146,11 +157,24 @@ function createVoiceCore(deps = {}) {
 
   const metrics = deps.metrics || createVoiceMetrics();
   const state = deps.state || createVoiceStateService({ now });
-  const policy = deps.policy || createVoicePolicyEngine({ state, metrics });
+  // O Voice Core é quem liga a política ao personagem REAL. A política sozinha
+  // nasce com o adapter nulo (ver `voice-policy`), para que um teste de alcance
+  // não precise de banco; aqui, onde há mundo, ela ganha o adapter que lê
+  // `core/character-state`.
+  const conditions = deps.conditions || createVoiceCharacterAdapter();
+  const occlusion = deps.occlusion || createVoiceOcclusion({ metrics });
+  const policy = deps.policy || createVoicePolicyEngine({ state, metrics, conditions, occlusion });
   const index = deps.index || createVoiceSpatialIndex({ bucketSize, metrics });
-  const routes = deps.routes || createVoiceRouteEngine({ state, policy, index, metrics });
+  const spatialEnabled = deps.spatial !== undefined ? deps.spatial : serverOptions.get('voice.spatial.enabled');
+  const routes = deps.routes || createVoiceRouteEngine({ state, policy, index, metrics, spatial: spatialEnabled });
   const sessions = deps.sessions || createVoiceSessionService({ state, metrics, logger, now });
   const gateway = deps.gateway || createVoiceLiveKitGateway({ metrics, logger, now });
+  const speaking = deps.speaking || createVoiceSpeakingState({ policy, now });
+  const speechAnimation = deps.speechAnimation || createVoiceSpeechAnimation({ mp: injectedMp, logger, now });
+
+  // A animação é ASSINANTE do estado de fala, não um segundo dono dele. É o que
+  // faz as cinco garantias de parada valerem para ela sem serem reimplementadas.
+  speechAnimation.bind(speaking);
 
   /**
    * O `mp` em vigor: o injetado, ou o global do host no instante da chamada.
@@ -177,12 +201,12 @@ function createVoiceCore(deps = {}) {
   const lastSample = new Map();
 
   /** Audiência do último recompute, consultada pelo relay a 50 quadros/s. */
-  /** @type {Map<number, {actorId: number, volume: number, distance: number}[]>} */
+  /** @type {Map<number, {actorId: number, volume: number, distance: number, effect: string}[]>} */
   let audienceBySpeaker = new Map();
-  /** @type {Map<number, Map<number, number>>} */
+  /** @type {Map<number, Map<number, {volume: number, effect: string, dir: number[]|null}>>} */
   let routesByListener = new Map();
 
-  /** @type {((routesByListener: Map<number, Map<number, number>>, result: object) => void)[]} */
+  /** @type {((routesByListener: Map<number, Map<number, {volume: number, effect: string, dir: number[]|null}>>, result: object) => void)[]} */
   const routeSubscribers = [];
 
   let _timer = null;
@@ -239,6 +263,13 @@ function createVoiceCore(deps = {}) {
 
       const space = rangeUtils.getCell(loc);
       const pos = loc.pos;
+      // `rot` é lido junto com `pos` porque vem do MESMO `locationalData`: uma
+      // ida ao `mp`, dois campos. Ler orientação num segundo `mp.get` dobraria
+      // a fronteira mais cara do sistema para buscar um número que já estava no
+      // objeto. Ausência é tolerada — `directionFor` trata `rot` faltando como
+      // olhando para o norte, e uma leitura sem orientação vale mais que uma
+      // pessoa sem rota.
+      const rot = Array.isArray(loc.rot) ? loc.rot : [0, 0, 0];
       const previous = lastSample.get(actorId);
 
       if (previous) {
@@ -254,7 +285,7 @@ function createVoiceCore(deps = {}) {
       }
 
       lastSample.set(actorId, { space, pos });
-      samples.push({ actorId, space, pos });
+      samples.push({ actorId, space, pos, rot });
     }
 
     // Quem saiu do estado de voz não deve deixar amostra para trás.
@@ -283,6 +314,11 @@ function createVoiceCore(deps = {}) {
 
     audienceBySpeaker = result.audienceBySpeaker;
     routesByListener = result.routesByListener;
+
+    // Fecha a boca de quem parou de falar — e de quem perdeu o direito no meio
+    // da frase. É a única das cinco garantias de parada que não tem um evento
+    // para pendurar: ninguém emite "você morreu, pare de falar".
+    speaking.sweep();
 
     for (const subscriber of routeSubscribers) {
       try {
@@ -402,6 +438,12 @@ function createVoiceCore(deps = {}) {
    * @param {string} [reason]
    */
   function detach(actorId, reason = 'detach') {
+    // Antes de tudo: a boca fecha. Sai daqui um `speaking=false` para quem
+    // estivesse ouvindo, e a animação para. Depois de `state.remove` a política
+    // já não sabe quem é este ator, e um `sweep` posterior não teria como
+    // decidir nada sobre ele — a limpeza precisa acontecer enquanto ele existe.
+    speaking.forget(actorId);
+    speechAnimation.forget(actorId);
     routes.forget(actorId);
     const closed = sessions.close(actorId, reason);
     state.remove(actorId);
@@ -438,6 +480,7 @@ function createVoiceCore(deps = {}) {
   /** @param {number} actorId @param {boolean} muted */
   function requestMute(actorId, muted) {
     const result = policy.requestMute(actorId, muted);
+    if (muted === true) speaking.clear(actorId);
     if (result.changed) markCritical(actorId, 'mute');
     return result;
   }
@@ -452,8 +495,26 @@ function createVoiceCore(deps = {}) {
   /** @param {number} actorId */
   function pttUp(actorId) {
     const result = policy.pttUp(actorId);
+    // Soltar a tecla fecha a boca no MESMO instante, sem esperar o sweep. O
+    // sweep é a rede de segurança para o que não avisa; o PTT avisa.
+    speaking.clear(actorId);
     if (result.changed) markCritical(actorId, 'pttUp');
     return result;
+  }
+
+  /**
+   * Um quadro de áudio chegou deste ator. Chamado pelo transporte a ~50 Hz.
+   *
+   * Devolve `false` quando a política recusa — e nesse caso o transporte
+   * também não deve retransmitir. É a mesma pergunta que `audienceFor` faz;
+   * expor as duas separadas seria abrir a chance de o relay perguntar uma e
+   * animar pela outra.
+   *
+   * @param {number} actorId
+   * @param {number} [level] 0..1, se algum dia o cliente medir e mandar
+   */
+  function noteAudioFrame(actorId, level) {
+    return speaking.noteFrame(actorId, level);
   }
 
   // ───────────────────────────────────────────────────────────────────────────
@@ -476,14 +537,49 @@ function createVoiceCore(deps = {}) {
     return audienceBySpeaker.get(actorId) || [];
   }
 
-  /** Mapa de volume de um ouvinte, no formato que o `proximity_update` usa. */
+  /**
+   * A audiência do último recompute, **sem** perguntar à política.
+   *
+   * Existe para um caso só, e é o caso em que `audienceFor` não serve: avisar
+   * que alguém PAROU de falar. A parada quase sempre é a própria razão de a
+   * política agora recusar — PTT solto, mute, morte — e `audienceFor` devolveria
+   * `[]` justamente quando há gente para avisar. O resultado seria uma boca
+   * aberta congelada em quem estava ouvindo.
+   *
+   * Não substitui `audienceFor` em lugar nenhum: aqui não se entrega áudio, se
+   * entrega um `false`.
+   *
+   * @param {number} actorId
+   */
+  function lastAudienceFor(actorId) {
+    return audienceBySpeaker.get(actorId) || [];
+  }
+
+  /**
+   * O que um ouvinte recebe, no formato do `proximity_update`.
+   *
+   * `dir` é um vetor **unitário no referencial do ouvinte**, não uma posição:
+   * a atenuação por distância continua sendo do servidor e mora em `volume`.
+   * Ver `voice-spatial.js` para por que essa separação é obrigatória.
+   */
   function peersFor(actorId) {
     const routeMap = routesByListener.get(actorId);
     if (!routeMap) return [];
-    return [...routeMap.entries()].map(([speaker, volume]) => ({ actorId: speaker, volume }));
+    return [...routeMap.entries()].map(([speaker, route]) => ({
+      actorId: speaker,
+      volume: route.volume,
+      effect: route.effect,
+      dir: route.dir,
+      speaking: speaking.isSpeaking(speaker)
+    }));
   }
 
-  /** @param {(routesByListener: Map<number, Map<number, number>>, result: object) => void} cb */
+  /** Parâmetros dos efeitos, para viajarem UMA vez no handshake. */
+  function effects() {
+    return effectSettings();
+  }
+
+  /** @param {(routesByListener: Map<number, Map<number, {volume: number, effect: string, dir: number[]|null}>>, result: object) => void} cb */
   function onRoutes(cb) {
     routeSubscribers.push(cb);
     return () => {
@@ -523,6 +619,8 @@ function createVoiceCore(deps = {}) {
   /** Limpeza completa: sessões fora, rotas zeradas, estado vazio. */
   function shutdown(reason = 'shutdown') {
     stop();
+    speechAnimation.clearAll();
+    speaking.clearAll();
     const identities = sessions.closeAll(reason);
     for (const identity of identities) {
       Promise.resolve(gateway.removeParticipant(identity)).catch(() => {});
@@ -546,6 +644,10 @@ function createVoiceCore(deps = {}) {
       sessions: sessions.size(),
       subscriptions: routes.subscriptionCount(),
       spatial: index.describe(),
+      spatialAudio: spatialEnabled,
+      occlusion: occlusion.describe(),
+      speaking: speaking.describe(),
+      speechAnimation: speechAnimation.describe(),
       gateway: gateway.describe(),
       metrics: metrics.snapshot()
     };
@@ -557,11 +659,12 @@ function createVoiceCore(deps = {}) {
     // ciclo de vida
     attach, detach, identityOf,
     // intenções do cliente
-    requestVoiceMode, requestMute, pttDown, pttUp,
+    requestVoiceMode, requestMute, pttDown, pttUp, noteAudioFrame,
     // consulta
-    audienceFor, peersFor, onRoutes, describe,
+    audienceFor, lastAudienceFor, peersFor, onRoutes, describe, effects,
     // módulos, para quem precisar do de baixo (teste, diagnóstico)
     state, policy, index, routes, sessions, gateway, metrics,
+    conditions, occlusion, speaking, speechAnimation,
     tickMs
   };
 }

@@ -209,6 +209,7 @@ const MAX_VOIP_MESSAGE_BYTES = 32 * 1024;
 
 let wss = null;
 let _unsubscribeRoutes = null;
+let _unsubscribeSpeaking = null;
 
 /**
  * Atores em **microfone aberto** — os que autenticaram sem declarar
@@ -410,7 +411,12 @@ function startVoipServer(port = VOIP_PORT, host = VOIP_BIND_HOST) {
             `${clientSpeaksPtt ? ' (PTT)' : ' (microfone aberto — legado)'}.`
           );
           ws.send(JSON.stringify({
-            type: 'auth_ok', actorId: clientActorId, role: clientRole, ptt: clientSpeaksPtt
+            type: 'auth_ok', actorId: clientActorId, role: clientRole, ptt: clientSpeaksPtt,
+            // Parâmetros dos efeitos, UMA vez por conexão. Eles vêm do
+            // `server-options` e não mudam enquanto o servidor roda; repetir a
+            // frequência de corte em cada `proximity_update` seria mandar 50
+            // vezes por segundo um número que muda quando alguém edita um JSON.
+            effects: voiceCore.effects()
           }));
           break;
         }
@@ -562,13 +568,36 @@ function startVoipServer(port = VOIP_PORT, host = VOIP_BIND_HOST) {
     for (const actorId of voipClients.keys()) {
       const listener = _openListener(actorId);
       if (!listener) continue;
-      const routes = routesByListener.get(actorId);
-      const peers = routes
-        ? [...routes.entries()].map(([speaker, volume]) => ({ actorId: speaker, volume }))
-        : [];
-      listener.ws.send(JSON.stringify({ type: 'proximity_update', peers }));
+      // `peersFor` é a fonte única do formato: ele já compõe volume, efeito,
+      // direção e estado de fala. Remontar a lista aqui a partir do mapa cru
+      // faria este arquivo ter uma segunda opinião sobre o payload, e ela
+      // envelheceria calada — foi assim que `character.id` virou `undefined`.
+      listener.ws.send(JSON.stringify({ type: 'proximity_update', peers: voiceCore.peersFor(actorId) }));
     }
   });
+
+  // Estado de fala → quem está em alcance. É o que permite ao cliente animar a
+  // boca de outra pessoa e acender o HUD dela sem esperar o próximo
+  // `proximity_update` — a transição de fala é o evento mais rápido do sistema,
+  // e amarrá-la ao tick de 150 ms produziria bocas atrasadas em relação ao som.
+  //
+  // Vai só para quem JÁ ouve o locutor: quem não recebe a voz dele não tem o
+  // que animar, e mandar assim mesmo seria contar a todo mundo, o tempo todo,
+  // quem está falando onde.
+  _unsubscribeSpeaking = voiceCore.speaking.onChange((actorId, isSpeaking) => {
+    const audience = voiceCore.audienceFor(actorId);
+    const raw = JSON.stringify({ type: 'voice_speaking', actorId, speaking: isSpeaking });
+    // Ao PARAR, a audiência já pode estar vazia (foi o que causou a parada).
+    // Nesse caso o aviso vai para quem estava ouvindo no último recompute, que
+    // é a informação mais recente que existe — sem isso, soltar o PTT deixaria
+    // a boca aberta em quem acabou de sair de alcance.
+    const targets = audience.length > 0 ? audience : voiceCore.lastAudienceFor(actorId);
+    for (const listener of targets) {
+      const client = _openListener(listener.actorId);
+      if (client) client.ws.send(raw);
+    }
+  });
+
   voiceCore.start();
 
   console.log('[voip] VOIP service initialized.');
@@ -619,6 +648,13 @@ function relayAudioFrame(fromActorId, msg) {
   const audience = voiceCore.audienceFor(fromActorId);
   if (!audience || audience.length === 0) return 0;
 
+  // O quadro chegou e a política deixou passar: este ator ESTÁ falando. É o
+  // único sinal honesto disso que o servidor tem — o PTT diz que ele pode, não
+  // que ele está. `noteAudioFrame` reconsulta `canSpeak` e devolve `false` se
+  // a resposta mudou desde o recompute, e nesse caso o quadro não é
+  // retransmitido: mesma pergunta, mesma resposta, um lugar só.
+  if (!voiceCore.noteAudioFrame(fromActorId)) return 0;
+
   let delivered = 0;
   for (const listener of audience) {
     // Sempre a conexão `listener` do ouvinte, nunca um `sender` dele: o helper
@@ -637,6 +673,10 @@ function relayAudioFrame(fromActorId, msg) {
       type: 'audio_frame',
       fromActorId,
       volume: listener.volume,
+      // O efeito viaja com o quadro, e não só no `proximity_update`, porque
+      // uma mordaça aplicada entre dois ticks precisa valer no quadro
+      // seguinte — não no próximo tick. É um campo curto; o payload é PCM.
+      effect: listener.effect,
       seq: msg.seq,
       data: msg.data
     }));
@@ -685,6 +725,8 @@ function getListeningPort() {
 function stopVoipServer() {
   if (_unsubscribeRoutes) _unsubscribeRoutes();
   _unsubscribeRoutes = null;
+  if (_unsubscribeSpeaking) _unsubscribeSpeaking();
+  _unsubscribeSpeaking = null;
   voiceCore.shutdown('stopVoipServer');
   _openMicActors.clear();
   if (!wss) return;

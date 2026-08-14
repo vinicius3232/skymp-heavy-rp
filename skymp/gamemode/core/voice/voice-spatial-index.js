@@ -84,6 +84,11 @@ const DEFAULT_BUCKET_SIZE = 2048;
  * @property {number} actorId
  * @property {string|null} space
  * @property {number[]} pos
+ * @property {number[]} [rot] ângulos em graus; só `rot[2]` (yaw) importa para a
+ *   voz. O índice **não** o usa — ele viaja junto porque quem calcula a direção
+ *   (`voice-route-engine`) recebe a amostra do ouvinte por este caminho, e
+ *   buscá-la de novo por `actorId` seria um `Map.get` por rota para reler o que
+ *   já estava na mão.
  */
 
 /**

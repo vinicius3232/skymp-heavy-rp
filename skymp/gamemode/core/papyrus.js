@@ -42,11 +42,20 @@
  * Referência a algo que existe no mundo — ator ou objeto colocado.
  * É o que vai no `self` de toda chamada `'method'`.
  *
+ * `injectedMp` existe para os módulos que resolvem o `mp` por conta própria em
+ * vez de ler o global — `core/voice/*` é o caso, porque eles são construídos
+ * antes de o host publicar o global e por isso já carregam a referência que
+ * vale. Sem o parâmetro, esses módulos teriam que montar `{type, desc}` à mão,
+ * e a forma crua do FormID voltaria a existir em algum lugar do repositório.
+ * Ver o cabeçalho: foram 22 chamadas erradas da última vez.
+ *
  * @param {number} formId
+ * @param {any} [injectedMp] a API do SkyMP; padrão: o global
  * @returns {{type: 'form', desc: string}}
  */
-function actorRef(formId) {
-  return { type: 'form', desc: mp.getDescFromId(formId) };
+function actorRef(formId, injectedMp) {
+  const skymp = injectedMp || mp;
+  return { type: 'form', desc: skymp.getDescFromId(formId) };
 }
 
 /**
