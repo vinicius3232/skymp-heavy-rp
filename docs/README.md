@@ -2,7 +2,11 @@
 
 Mapa dos documentos do projeto. Se você acabou de chegar, leia na ordem da primeira seção.
 
-> **Última conferência contra o código: 11/08/2026.** README, arquitetura, plano principal, design da Alma, roadmap ativo e changelog foram reconciliados com o commit `c23179d`. Documentos de handoff e pesquisa são registros datados: quando superados, preservam o contexto histórico e recebem aviso explícito. Se você encontrar um documento afirmando algo que o código não faz, isso é um bug — [abra uma issue](https://github.com/vinicius3232/skymp-heavy-rp/issues) ou corrija no seu PR.
+> **Última conferência contra o código: 14/08/2026, commit `e39e506`.** A rodada rodou as cinco suítes e conferiu cada número afirmado: gamemode **1270/1270** + 13/13 checks, launcher **74/74**, game-api **48/48**, painel web 40/40, bot 40/40; migrations até a **v16**; **doze** módulos registrados e **cinco** PARKED. O que estava errado e foi corrigido: `QA_REPORT` (nas quatro línguas) declarava 444, 24 e 30 testes e listava o `trade-service` como PARKED; `ARCHITECTURE` (nas quatro) parava nas migrations `v13` e dizia que a voz esperava um patch de client que já foi **descartado**; o `README` mandava o leitor para um plano de teste superado; e `FASE_0_ROTEIRO` dizia 578 testes.
+>
+> Documentos de handoff e pesquisa são registros datados: quando superados, preservam o contexto histórico, recebem aviso explícito e vão para [`historico/`](#histórico). Se você encontrar um documento afirmando algo que o código não faz, isso é um bug — [abra uma issue](https://github.com/vinicius3232/skymp-heavy-rp/issues) ou corrija no seu PR.
+>
+> **Números datados dentro de documento datado não são bug.** Uma auditoria de 13/08 que diz "716 testes" está descrevendo o dia dela e continua correta. O que não pode envelhecer é o documento que se apresenta como **estado atual** — e são só estes: [`QA_REPORT`](technical/QA_REPORT_2026-08.md), [`ARCHITECTURE`](ARCHITECTURE.md), [`FASE_0_ROTEIRO`](technical/FASE_0_ROTEIRO.md), o [`README`](../README.md) e este índice.
 
 ---
 
@@ -33,6 +37,7 @@ Mapa dos documentos do projeto. Se você acabou de chegar, leia na ordem da prim
 | [PLUGIN_LOAD_ORDER_STRATEGY.md](technical/PLUGIN_LOAD_ORDER_STRATEGY.md) | Por que o primeiro byte do FormID é o índice do plugin, por que **ESL não existe no SkyMP**, e o que o nosso gate de paridade ainda deixa passar. |
 | [SKYMP_PATCH_POLICY.md](technical/SKYMP_PATCH_POLICY.md) | Quando patch, quando adapter, quando extensão de cliente, quando PR — e o que mudou quando o upstream passou a exigir cessão de direito autoral. |
 | [`core/skymp-adapter/`](../skymp/gamemode/core/skymp-adapter/README.md) | A fronteira declarada contra o motor: identidade, Papyrus e detecção de capacidade. Só os boundaries que a auditoria provou instáveis. |
+| [REVISAO_REALIDADE_COMPARTILHADA.md](technical/REVISAO_REALIDADE_COMPARTILHADA.md) | **Quais sistemas nossos dependem de os dois clientes verem a mesma coisa** — e o que o SkyMP realmente sincroniza por baixo deles. Derivado das §8 e §9 da referência upstream; foi o que derrubou premissas do `death-service`. |
 | [MODS_AND_GAMEMODE_CONTRACT.md](technical/MODS_AND_GAMEMODE_CONTRACT.md) | O que acontece com um mod dentro de um cliente conectado. Responde "esse mod funciona no servidor?" com critério. |
 | [SKYMP_SERVER_SETUP.md](technical/SKYMP_SERVER_SETUP.md) | Instalação e configuração do servidor SkyMP. |
 | [OPERATIONS.md](technical/OPERATIONS.md) | Runbook: subir, conferir schema, quem pode o quê, portas, e o que fazer quando algo dá errado. |
@@ -103,6 +108,7 @@ Mapa dos documentos do projeto. Se você acabou de chegar, leia na ordem da prim
 | [technical/AUTH_001_TRUST_BOUNDARY_INVENTORY.md](technical/AUTH_001_TRUST_BOUNDARY_INVENTORY.md) | Inventário das identidades, tokens e fronteiras de confiança. |
 | [technical/AUTH_002_OPAQUE_TICKET_V1.md](technical/AUTH_002_OPAQUE_TICKET_V1.md) | Contrato de credencial opaca, hashing e redaction. |
 | [technical/CHR_001_ACCOUNT_SESSION_CHARACTER_IDENTITY.md](technical/CHR_001_ACCOUNT_SESSION_CHARACTER_IDENTITY.md) | Contrato de identidade entre conta, sessão e personagem. |
+| [technical/AUTH_LAUNCH_TICKET_ATOMICITY_AUDIT.md](technical/AUTH_LAUNCH_TICKET_ATOMICITY_AUDIT.md) | O consumo do launch ticket em `apps/game-api/server.js` é atômico por `UPDATE` condicional, sem `SELECT` antes — a auditoria que fecha a janela de corrida. |
 
 ### Pesquisa de forks
 
@@ -118,6 +124,48 @@ As duas rodadas cobrem conjuntos **diferentes** de projetos e se somam. A de 12/
 | [research/SKYMP_ECOSYSTEM_SYSTEM_MAP.md](research/SKYMP_ECOSYSTEM_SYSTEM_MAP.md) | Mapa dos sistemas encontrados nos forks estudados. |
 | [research/SKYMP_FORKS_SYSTEM_MATRIX.md](research/SKYMP_FORKS_SYSTEM_MATRIX.md) | Matriz comparativa dos forks. |
 | [technical/REFERENCE_STUDY_SKYMP_FORKS_2026-08-11.md](technical/REFERENCE_STUDY_SKYMP_FORKS_2026-08-11.md) | Estudo técnico consolidado e rastreável. |
+| [research/SKYMP_ARCHITECTURE_PATTERNS.md](research/SKYMP_ARCHITECTURE_PATTERNS.md) | Os padrões que a pesquisa recomendou adotar e os que recomendou recusar — `intent → validação → transação → evento → projeção`, identidade em quatro camadas, manifesto autenticado, sessões opacas. |
+| [research/HEAVY_RP_GAP_ANALYSIS.md](research/HEAVY_RP_GAP_ANALYSIS.md) | Gap analysis por área, com evidência e próximo gate. **Nenhum domínio que dependa de sessão multiplayer real recebeu `COMPLETE`** — é a tabela que mais depende da Fase 0. |
+| [roadmap/FORK_RESEARCH_ROADMAP.md](roadmap/FORK_RESEARCH_ROADMAP.md) | A sequência e os gates propostos pela rodada de 12/08. **Não substitui** o `SKYMP_RP_DEVELOPMENT_PLAN.md`, e nenhum módulo PARKED deve ser registrado como consequência automática dele. |
+
+#### Dossiês por fork (rodada de 12/08)
+
+Os nove documentos abaixo são a leitura individual de cada fork, e é neles que estão as citações de arquivo e linha que as matrizes resumem. Consulte quando a matriz disser *o quê* e você precisar do *onde*.
+
+[01 SkyrimRoleplay](research/forks/01-SKYRIMROLEPLAY.md) · [02 enricomalta](research/forks/02-ENRICOMALTA.md) · [03 F02K](research/forks/03-F02K.md) · [04 NirnRP](research/forks/04-NIRNRP.md) · [05 TheZebco](research/forks/05-THEZEBCO.md) · [06 FusRoBra](research/forks/06-FUSROBRA.md) · [07 DonAthelion](research/forks/07-DONATHELION.md) · [08 PepsiPlaya](research/forks/08-PEPSIPLAYA.md) · [09 outros forks](research/forks/09-OTHER-FORKS.md)
+
+---
+
+## Frameworks: os caminhos obrigatórios
+
+Três coisas no gamemode têm **um caminho só**, e escrever um módulo que não passe por ele é o erro que estes documentos existem para impedir. Cada framework tem a mesma tripla: o **contrato** (como usar), a **decisão** (por que é assim) e a **matriz de teste** (o que está travado e o que não está).
+
+| Framework | Contrato | Decisão | Matriz de teste | Auditoria que o originou |
+|---|---|---|---|---|
+| **Interação** — clique em alvo | [INTERACTION_FRAMEWORK.md](framework/INTERACTION_FRAMEWORK.md) | [ADR 002](technical/ADR_002_INTERACTION_FRAMEWORK.md) | [INTERACTION_TEST_MATRIX.md](testing/INTERACTION_TEST_MATRIX.md) | [CORE_FRAMEWORK_AUDIT.md](research/CORE_FRAMEWORK_AUDIT.md) |
+| **Inventário** — item que muda de dono | [INVENTORY_FRAMEWORK.md](framework/INVENTORY_FRAMEWORK.md) | [ADR 003](technical/ADR_003_INVENTORY_SOURCE_OF_TRUTH.md) | [INVENTORY_TRANSACTION_MATRIX.md](testing/INVENTORY_TRANSACTION_MATRIX.md) | [INVENTORY_TRADE_CRAFTING_AUDIT.md](research/INVENTORY_TRADE_CRAFTING_AUDIT.md) |
+| **Economia** — dinheiro que se move | [ECONOMY_FRAMEWORK.md](framework/ECONOMY_FRAMEWORK.md) | [ADR 004](technical/ADR_004_ECONOMY_ACCOUNTS_AND_LEDGER.md) | [ECONOMY_SECURITY_MATRIX.md](testing/ECONOMY_SECURITY_MATRIX.md) | [ECONOMY_FRAMEWORK_AUDIT.md](research/ECONOMY_FRAMEWORK_AUDIT.md) |
+
+| Documento | Sobre |
+|---|---|
+| [framework/MODULE_SYSTEM.md](framework/MODULE_SYSTEM.md) | O que é um módulo, o que ele declara e quando o registry decide subi-lo. É a peça abaixo dos três frameworks acima. |
+| [technical/ADR_001_ONLINE_PROFILE_ID_IS_ACCOUNT_ID.md](technical/ADR_001_ONLINE_PROFILE_ID_IS_ACCOUNT_ID.md) | **IMPLEMENTADO.** O `profileId` do caminho online representa o `accountId` interno; o Discord ID é atributo externo, nunca identidade. |
+| [research/CORE_FRAMEWORK_AUDIT.md](research/CORE_FRAMEWORK_AUDIT.md) | A auditoria que precede o Interaction Framework: o que já resolvia o problema, o que resolvia pela metade, e o que estava no caminho. Onde documento e código discordaram, o código venceu. |
+
+---
+
+## Sistemas de gameplay
+
+Cada um é um serviço com documento próprio. **A etiqueta de estado é a informação mais importante da tabela** — PARKED significa que o serviço existe no disco e nunca sobe.
+
+| Sistema | Estado | Documento |
+|---|---|---|
+| **Troca entre jogadores** | Registrado como `trade`, atrás de `ENABLE_TRADE_SERVICE` (nasce `false`). Sem UI CEF, nunca rodou em sessão real. | [gameplay/TRADE_SYSTEM.md](gameplay/TRADE_SYSTEM.md) |
+| **Contratos** | Um jogador publica trabalho, outro aceita, o servidor move os septims. Sem NPC e sem fila de staff. | [gameplay/CONTRACTS.md](gameplay/CONTRACTS.md) |
+| **Dívida** | Registro selado e legível — **nunca** cobrança automática. | [gameplay/DEBT_SYSTEM.md](gameplay/DEBT_SYSTEM.md) |
+| **Crafting** | **PARKED.** Foi migrado para o Inventory Framework, e migrar **não** é reativar. | [gameplay/CRAFTING_SYSTEM.md](gameplay/CRAFTING_SYSTEM.md) |
+
+---
 
 ---
 
