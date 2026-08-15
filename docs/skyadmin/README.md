@@ -32,7 +32,7 @@ Este diretório é o ponto de entrada para construir o painel administrativo e d
 | Limites de confiança | [../technical/AUTH_001_TRUST_BOUNDARY_INVENTORY.md](../technical/AUTH_001_TRUST_BOUNDARY_INVENTORY.md) |
 | Operação do SkyMP | [../technical/OPERATIONS.md](../technical/OPERATIONS.md), [../technical/SKYMP_SERVER_SETUP.md](../technical/SKYMP_SERVER_SETUP.md) |
 | Critério de whitelist | [../staff/WHITELIST_RUBRIC.md](../staff/WHITELIST_RUBRIC.md) |
-| Migrations e schema | `skymp/packages/database/schema.sql` e migrations `v2`–`v13` |
+| Migrations e schema | `skymp/packages/database/schema.sql` e migrations `v2`–`v16` |
 | Regras do servidor | [../rules/HEAVY_RP_RULES.md](../rules/HEAVY_RP_RULES.md) |
 
 ## Convenção
