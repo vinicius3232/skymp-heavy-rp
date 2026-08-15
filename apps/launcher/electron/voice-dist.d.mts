@@ -48,6 +48,8 @@ export function helperArgs(args: {
   controlPort: number;
   pairingToken: string;
   logLevel?: string;
+  /** pid do launcher; o helper sai quando ele morrer. Omitido = sem guarda. */
+  parentPid?: number;
 }): string[];
 
 export function voiceConfigForClient(args: {
