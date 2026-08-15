@@ -1,0 +1,9 @@
+{
+  "name": "skyvoice-livekit-cpp-spike",
+  "version-string": "0.0.0",
+  "description": "SPIKE: cliente LiveKit em C++ contra um SFU real. Nao e producao.",
+  "homepage": "https://github.com/vinicius3232/skymp-heavy-rp",
+  "dependencies": [
+    "nlohmann-json"
+  ]
+}

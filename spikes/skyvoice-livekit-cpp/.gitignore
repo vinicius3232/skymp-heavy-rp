@@ -1,0 +1,7 @@
+# Saída do CMake/MSVC e o que o vcpkg instala. Nada aqui é fonte.
+build/
+
+# O SDK pré-compilado do LiveKit NÃO é versionado: são 26 MB de DLL e o release
+# oficial é a fonte. Ver README.md para o download e o SHA-256 conferido.
+livekit-sdk-*/
+livekit-sdk-*.zip
