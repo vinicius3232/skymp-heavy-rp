@@ -87,7 +87,7 @@ Mapa dos documentos do projeto. Se você acabou de chegar, leia na ordem da prim
 | [FASE_0_ROTEIRO.md](technical/FASE_0_ROTEIRO.md) | **O roteiro do teste in-game — o único bloqueio real do projeto.** Passo a passo, o que observar, o que significa falhar, e o registro pra preencher enquanto testa. Comece pelo guia acima. |
 | [FAUNA_CENSUS_PROTOCOL.md](technical/FAUNA_CENSUS_PROTOCOL.md) | Sessão separada do roteiro, e de outra natureza: **não há "passou" nem "falhou", só o que existe no mundo.** Como rodar o censo de fauna e a prova do cadáver — as duas perguntas que decidem se a mecânica de caça existe. |
 | [MOBS_LOOT_LAB_HANDOFF_2026-08-12.md](roadmap/MOBS_LOOT_LAB_HANDOFF_2026-08-12.md) | Resultado do boot instrumentado: NPCs estavam desabilitados por ausência de `npcEnabled`; configuração local corrigida, sondas carregadas e comandos da sessão in-game registrados. |
-| [GOVERNANCE_MARKET_STALLS_TEST_PLAN.md](technical/GOVERNANCE_MARKET_STALLS_TEST_PLAN.md) | Plano em camadas de 13/07, restrito a governança e barracas. Superado pelo roteiro acima. |
+| [historico/GOVERNANCE_MARKET_STALLS_TEST_PLAN.md](historico/GOVERNANCE_MARKET_STALLS_TEST_PLAN.md) | Plano em camadas de 13/07, restrito a governança e barracas. **Superado pelo roteiro acima** — ver [Histórico](#histórico). |
 
 ### Ciclo de hardening de 11/08/2026
 
@@ -179,10 +179,22 @@ As duas rodadas cobrem conjuntos **diferentes** de projetos e se somam. A de 12/
 
 ## Histórico
 
+**Registro ativo** — este ainda se preenche:
+
 | Documento | Sobre |
 |---|---|
-| [roadmap/PHASE_0_TEST_LOG.md](roadmap/PHASE_0_TEST_LOG.md) | Evidências dos testes da Fase 0 (11/07/2026 — boot de servidor, `offlineMode=true`). |
 | [roadmap/FASE_0_LOG_2026-08-06.md](roadmap/FASE_0_LOG_2026-08-06.md) | Registro da execução do [roteiro atual](technical/FASE_0_ROTEIRO.md). Etapa 0 preenchida; o resto aguarda a sessão com dois jogadores. |
+| [roadmap/MOBS_LOOT_LAB_HANDOFF_2026-08-12.md](roadmap/MOBS_LOOT_LAB_HANDOFF_2026-08-12.md) | Resultado do boot instrumentado, e os comandos da sessão in-game que ficaram registrados para ela. |
+
+**Superados — [`historico/`](historico/)**. Ficam porque explicam *por que* decisões foram tomadas, e cada um abre com o aviso do que mudou desde então. **Nenhum descreve o estado atual; não cite nenhum como evidência.**
+
+| Documento | O que preserva |
+|---|---|
+| [historico/PHASE_0_TEST_LOG.md](historico/PHASE_0_TEST_LOG.md) | O **primeiro boot de servidor** do projeto (11/07/2026, `offlineMode=true`, gamemode mínimo). Única prova documental daquele boot. |
+| [historico/GOVERNANCE_MARKET_STALLS_TEST_PLAN.md](historico/GOVERNANCE_MARKET_STALLS_TEST_PLAN.md) | O plano em camadas de 13/07, superado pelo [roteiro](technical/FASE_0_ROTEIRO.md). Mantido pela camada 5 (validação visual), que o roteiro novo não cobre. |
+| [historico/CLAUDE_HANDOFF_IMPLEMENTACOES_E_PESQUISA_2026-08-11.md](historico/CLAUDE_HANDOFF_IMPLEMENTACOES_E_PESQUISA_2026-08-11.md) | Por que fronteiras de confiança, economia transacional e idempotência de barracas foram feitas nessa ordem. Descreve a voz como relay próprio — leia o [SkyVoice](technical/SKYVOICE_PRODUCTION_READINESS.md) em vez disso. |
+| [historico/CODEX_PRE_CLAUDE_HANDOFF_2026-08-12.md](historico/CODEX_PRE_CLAUDE_HANDOFF_2026-08-12.md) | As invariantes acordadas na passagem de bastão — elas continuam valendo; o estado descrito não. |
+| [historico/C0_01_CURRENT_SNAPSHOT_HANDOFF.md](historico/C0_01_CURRENT_SNAPSHOT_HANDOFF.md) | O snapshot que virou o commit `c23179d`. Árvore dirty e ownership temporário são do momento do handoff. |
 
 ---
 

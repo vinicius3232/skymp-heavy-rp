@@ -1,5 +1,13 @@
 # Fase 0 - Log de Testes
 
+> ⚠️ **Registro histórico (11/07/2026).** É a evidência do **primeiro boot de
+> servidor** do projeto, com `offlineMode=true` e o gamemode mínimo
+> `phase0-basic.js`. Preservado porque é a única prova documental daquele boot —
+> mas **não é o registro que se preenche hoje**. O roteiro em vigor é
+> [`FASE_0_ROTEIRO.md`](../technical/FASE_0_ROTEIRO.md) e o log ativo é
+> [`FASE_0_LOG_2026-08-06.md`](../roadmap/FASE_0_LOG_2026-08-06.md).
+> Não acrescente linhas aqui.
+
 Use este arquivo para registrar evidencias reais dos testes SkyMP.
 
 ## Ambiente

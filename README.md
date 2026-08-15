@@ -44,7 +44,7 @@ Focada em *Roleplay Estrito*: autoridade do servidor sobre economia, identidade 
 
 - **API do Jogo (`apps/game-api`)**: serve a porta 7758 que o launcher sempre chamou e que não existia — `/mods.json` (paridade de modpack, a base do contrato de FormID) e a fila de entrada com capacidade e expiração de reserva. A fila é autenticada por ticket emitido pelo painel, nunca pelo `discordId` que o cliente informa. Manifesto gerado por `scripts/generate-mods-manifest.js`.
 
-> ⚠️ **O servidor ainda não foi validado com jogadores reais.** Todo o gamemode está verificado só por teste unitário com `mp` mockado — o próximo passo é rodar o [plano de teste in-game](docs/technical/GOVERNANCE_MARKET_STALLS_TEST_PLAN.md) com as flags `ENABLE_*` ligadas. Continua aberto também que o gamemode ainda deriva identidade do `profileId` do cliente em vez de validar o ticket de sessão. Plano completo em [QA_REPORT_2026-08.md](docs/technical/QA_REPORT_2026-08.md) §3.
+> ⚠️ **O servidor ainda não foi validado com jogadores reais.** Todo o gamemode está verificado só por teste unitário com `mp` mockado — o próximo passo é rodar o [roteiro de teste in-game](docs/technical/FASE_0_ROTEIRO.md) com as flags `ENABLE_*` ligadas; para chegar até ele, o [guia de sessão](docs/technical/GUIA_SESSAO_DE_TESTE.md) explica como subir os quatro serviços. Plano completo em [QA_REPORT_2026-08.md](docs/technical/QA_REPORT_2026-08.md) §3.
 
 ## Como Executar o Servidor (Desenvolvimento)
 

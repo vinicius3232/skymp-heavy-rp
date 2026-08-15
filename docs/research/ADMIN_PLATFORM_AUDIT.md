@@ -24,7 +24,7 @@ esta auditoria discorda de um documento existente, o código ganha.
 | Discord | `apps/bot-discord/index.js`, `voiceChannels.js`, `moderationLog.js` |
 
 **O que esta auditoria NÃO fez:** não subiu banco, não conectou jogador, não
-mediu latência. A [memória do projeto vale aqui](../roadmap/PHASE_0_TEST_LOG.md):
+mediu latência. A [memória do projeto vale aqui](../historico/PHASE_0_TEST_LOG.md):
 a Fase 0 ainda não teve uma sessão real com jogador conectado, então tudo que
 depende de comportamento em jogo está marcado como **não observado**.
 
@@ -434,5 +434,5 @@ Derivada da severidade acima, não da ordem do briefing:
    única que exige desenho de protocolo novo.
 
 Os itens 1–6 não dependem de sessão em jogo. O item 7 depende, e o
-[bloqueio da Fase 0](../roadmap/PHASE_0_TEST_LOG.md) continua sendo o que ele
+[bloqueio da Fase 0](../historico/PHASE_0_TEST_LOG.md) continua sendo o que ele
 sempre foi: **ninguém nunca conectou**.

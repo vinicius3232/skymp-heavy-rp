@@ -687,7 +687,7 @@ inventar livremente.
 **Veredito: 🟡 Provável, pendente de Fase 0.**
 
 Nada na arquitetura contraria. O que falta é o de sempre: ninguém executou uma
-compra com duas pessoas conectadas. O `GOVERNANCE_MARKET_STALLS_TEST_PLAN.md` já
+compra com duas pessoas conectadas. O [`GOVERNANCE_MARKET_STALLS_TEST_PLAN.md`](../historico/GOVERNANCE_MARKET_STALLS_TEST_PLAN.md) já
 existe para isso.
 
 **Duas observações menores, nenhuma muda o veredito:**
