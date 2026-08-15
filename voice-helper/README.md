@@ -21,10 +21,13 @@ depois. A arquitetura e o porquê estão em
 
 ## Limitações desta fase (deliberadas)
 
-- **O ticket é passado à mão**, por linha de comando. Não há handoff automático
-  entre o jogo e o helper — é trabalho da Fase 3. Para conseguir ler o ticket
-  durante um teste manual existe um andaime temporário
-  (`VOIP_DEBUG_EXPOSE_TICKET`), descrito em VOICE_NATIVE_HELPER.md §11.
+- ~~**O ticket é passado à mão**, por linha de comando.~~ **Resolvido em
+  14/08/2026.** O helper tem um canal de controle em loopback (`--control-port`
+  + `--pair`) e recebe o ticket por POST, sem passar por humano nem por disco.
+  Ver SKYVOICE_E2E_ETAPA_5.md §3. O modo de linha de comando continua existindo
+  para bancada.
+  **O que ainda falta é o mensageiro:** quem deveria fazer esse POST é a CEF, e
+  o `index.html` ainda não o faz (§4 do mesmo documento).
 - ~~**O helper e a UI do mesmo jogador não coexistem.**~~ **Resolvido em
   07/08/2026.** O `auth` passou a levar `role` (`listener` para a UI, `sender`
   para o helper) e o `voip-service` guarda as duas conexões por ator. O helper
@@ -105,6 +108,37 @@ mesmo sem usarmos TLS. Corrigido adicionando `bcrypt` ao `target_link_libraries`
 Detalhe em VOICE_NATIVE_HELPER.md §8.3.
 
 ## Rodar
+
+Dois modos, e eles são exclusivos — misturar argumentos dos dois é erro de
+argumento, não uma escolha silenciosa.
+
+### Modo pareado (o que o launcher usa)
+
+```bash
+voice-helper.exe --control-port 51997 --pair <segredo> --ptt --parent-pid <pid do launcher>
+```
+
+| Argumento | Obrigatório | Padrão | O quê |
+|---|---|---|---|
+| `--control-port` | sim | — | porta de loopback do canal de controle |
+| `--pair` | sim | — | segredo desta execução do launcher (≥ 16 chars) |
+| `--control-host` | não | `127.0.0.1` | só aceita loopback; existe para ser explícito |
+| `--pair-ttl` | não | `43200` | validade do pareamento, em segundos |
+| `--ptt` | não | desligado | declara que este cliente é governado por push-to-talk |
+| `--parent-pid` | não | — | o helper sai quando esse processo morrer |
+| `--log-level` | não | `info` | |
+
+Aqui **não se passa ticket**: ele não existe ainda quando o launcher sobe o
+helper. Quem o entrega é a CEF, por:
+
+```bash
+curl -X POST http://127.0.0.1:51997/ticket \
+  -d '{"pair":"<segredo>","actorId":4278194194,"ticket":"<token>","host":"127.0.0.1","port":7778}'
+```
+
+O microfone **só abre depois desse POST**, e fecha quando a sessão cai.
+
+### Modo direto (bancada)
 
 ```bash
 voice-helper.exe --actor-id 0xFF000A12 --ticket 753f03d8fa3c944a4c7b1dff7e7a08fb --host 127.0.0.1 --port 7778

@@ -692,18 +692,55 @@ async function startVoiceHelper(gamePath: string): Promise<{ started: boolean; r
     // qualquer outro processo da máquina de mandar um ticket ao helper.
     voicePairingToken = crypto.randomBytes(24).toString('hex');
 
-    const args = helperArgs({ controlPort: voiceControlPort, pairingToken: voicePairingToken });
+    const args = helperArgs({
+      controlPort: voiceControlPort,
+      pairingToken: voicePairingToken,
+      parentPid: process.pid
+    });
     const proc = spawn(exe, args, {
       cwd: path.dirname(exe),
       windowsHide: true,
       stdio: 'ignore',
-      // `detached: false` para o helper morrer junto se o launcher for derrubado
-      // de um jeito que não passa pelo `before-quit`.
+      // `detached: false` para o helper não ganhar console próprio. Ele NÃO
+      // basta para matar o helper junto no Windows — quem faz isso é a guarda
+      // de `--parent-pid`, ver `helperArgs`.
       detached: false
     });
-    proc.on('exit', () => { if (voiceHelperProcess === proc) voiceHelperProcess = null; });
+
+    let saidaPrecoce: number | null = null;
+    proc.on('exit', (code) => {
+      saidaPrecoce = code === null ? -1 : code;
+      if (voiceHelperProcess === proc) voiceHelperProcess = null;
+    });
     proc.on('error', () => { if (voiceHelperProcess === proc) voiceHelperProcess = null; });
     voiceHelperProcess = proc;
+
+    // `spawn` só falha se o executável não puder ser criado. Um helper que sobe
+    // e MORRE em seguida — argumento que ele não entende (saída 2), porta de
+    // controle ocupada por um órfão (saída 1) — passava por aqui como sucesso, e
+    // o launcher escrevia no config do jogo uma URL de controle que ninguém
+    // estava escutando. O sintoma chegava horas depois e a três camadas de
+    // distância: "digitei /voz e não aconteceu nada".
+    //
+    // Foi exatamente o que aconteceu até 2026-08-14: os argumentos deste
+    // `helperArgs` não existiam no `main.cpp`, e o helper saía com 2 em todas as
+    // execuções sem que nada aqui notasse.
+    //
+    // 400 ms é folga para o processo abrir a porta e falhar se for falhar, sem
+    // atrasar de forma perceptível a abertura do jogo.
+    await new Promise((r) => setTimeout(r, 400));
+    if (saidaPrecoce !== null) {
+      const codigo = saidaPrecoce;
+      voiceControlPort = 0;
+      voicePairingToken = '';
+      return {
+        started: false,
+        reason: codigo === 2
+          ? 'o helper recusou os argumentos (saída 2) — launcher e voice-helper.exe estão em versões incompatíveis'
+          : `o helper encerrou logo após subir (saída ${codigo})`
+      };
+    }
+
     return { started: true, reason: `helper iniciado na porta ${voiceControlPort}` };
   } catch (e: any) {
     voiceControlPort = 0;

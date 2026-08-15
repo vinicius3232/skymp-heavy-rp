@@ -221,6 +221,47 @@ test('helper — porta inválida é recusada', () => {
   }
 });
 
+test('helper — o pid do launcher vai junto, para a guarda de órfão', () => {
+  // `detached: false` não mata o helper quando o launcher morre no Windows. Se
+  // o pid não for passado, um launcher derrubado à força deixa para trás um
+  // processo sem janela que abriu o microfone — e nenhum caminho de saída do
+  // `main.ts` roda para limpá-lo.
+  const args = helperArgs({ controlPort: 45123, pairingToken: 'x'.repeat(32), parentPid: 4242 });
+  const i = args.indexOf('--parent-pid');
+  assert.ok(i >= 0, 'o argumento precisa existir');
+  assert.strictEqual(args[i + 1], '4242');
+});
+
+test('helper — sem pid válido, a guarda simplesmente não é pedida', () => {
+  // Passar `--parent-pid 0` seria pior que omitir: o helper trataria "não existe
+  // processo 0" como "o launcher morreu" e sairia antes de qualquer pareamento.
+  for (const pid of [undefined, 0, -1, 1.5, null, 'abc']) {
+    const args = helperArgs({ controlPort: 45123, pairingToken: 'x'.repeat(32), parentPid: pid });
+    assert.ok(!args.includes('--parent-pid'), `pid ${String(pid)} não deveria virar argumento`);
+  }
+});
+
+test('helper — os argumentos são exatamente os que o main.cpp aceita', () => {
+  // Este teste existe por um defeito real: até 2026-08-14 o `helperArgs`
+  // montava `--control-host/--control-port/--pair/--log-level/--ptt` e o
+  // `voice-helper/src/main.cpp` não conhecia NENHUM deles. O helper saía com
+  // código 2 em toda execução vinda do launcher, e o launcher reportava
+  // sucesso.
+  //
+  // A lista abaixo é a do `ParseArgs` do main.cpp. Quando um lado mudar sem o
+  // outro, é aqui que se descobre — e não numa sessão de teste com jogadores.
+  const aceitos = new Set([
+    '--control-host', '--control-port', '--pair', '--pair-ttl', '--parent-pid',
+    '--ptt', '--log-level', '--actor-id', '--ticket', '--host', '--port'
+  ]);
+  const args = helperArgs({ controlPort: 45123, pairingToken: 'x'.repeat(32), parentPid: 99 });
+  for (const a of args) {
+    if (a.startsWith('--')) {
+      assert.ok(aceitos.has(a), `${a} não existe no ParseArgs do voice-helper/src/main.cpp`);
+    }
+  }
+});
+
 // ── Config para a CEF ────────────────────────────────────────────────────────
 
 test('config do cliente — carrega o canal e o segredo, e nada de servidor', () => {

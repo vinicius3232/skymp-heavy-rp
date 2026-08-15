@@ -41,13 +41,21 @@ const GAMEMODE = path.resolve(__dirname, '..', '..', 'skymp', 'gamemode');
 // Posições dos atores no mundo, em unidades do Skyrim.
 const positions = new Map();
 
-// O gamemode fala com o servidor por este global. O voip-service só lê
-// `locationalData`, então é só isso que o mock precisa entregar.
+// Célula de cada ator. O formato é o do SkyMP — `"162e2:Skyrim.esm"`, nunca
+// `0x…`. Sem célula, `getCell` devolve `null` para todo mundo e o teste de
+// isolamento (§13 do roteiro) não tem o que isolar.
+const cells = new Map();
+const CELL_PADRAO = '3c:Skyrim.esm';
+
+// O gamemode fala com o servidor por este global.
 global.mp = {
   get: (actorId, prop) => {
     if (prop !== 'locationalData') return null;
     const pos = positions.get(Number(actorId));
-    return pos ? { pos } : null;
+    if (!pos) return null;
+    // `cellOrWorldDesc` é o campo que `core/range-utils.getCell` lê primeiro, e
+    // é o mesmo campo para célula e worldspace no SkyMP.
+    return { pos, cellOrWorldDesc: cells.get(Number(actorId)) || CELL_PADRAO };
   },
   set: () => {}
 };
@@ -64,7 +72,32 @@ Module._load = function (request, parent, isMain) {
 };
 const voip = require(path.join(GAMEMODE, 'voip-service.js'));
 const { VOICE_RANGES } = require(path.join(GAMEMODE, 'core', 'proximity-ranges.js'));
+const commands = require(path.join(GAMEMODE, 'commands.js'));
 Module._load = originalLoad;
+
+// Personagem ativo sintético.
+//
+// Sem isto o harness NÃO CONSEGUE ROTEAR VOZ NENHUMA: `voice-policy` recusa com
+// "personagem não carregado" (voice-policy.js:244) para todo ator cujo
+// `characterId` seja `null`, e o `getActiveCharacterData` de verdade lê a sessão
+// do banco — que aqui é um stub que devolve `[]`.
+//
+// O sintoma antes desta linha era o pior tipo: tudo conectava, o `/state` dizia
+// `connected`, o PTT respondia, e a audiência era sempre vazia. Descoberto em
+// 2026-08-14 ao apertar o PTT pela primeira vez contra o harness — o servidor
+// respondeu `{"transmitting":false,"reason":"personagem não carregado"}`.
+//
+// O id é derivado do actorId para ser estável entre reconexões do mesmo ator —
+// é assim que o staff mute e o estado de personagem continuam valendo depois de
+// um reconnect, e testar com id novo a cada conexão esconderia justamente isso.
+const characterOriginal = commands.getActiveCharacterData;
+commands.getActiveCharacterData = (actorId) => {
+  const real = characterOriginal ? characterOriginal(actorId) : null;
+  if (real) return real;
+  const id = Number(actorId);
+  if (!Number.isFinite(id) || !positions.has(id)) return null;
+  return { characterId: id, firstName: `Bancada${id.toString(16)}`, lastName: 'Teste' };
+};
 
 voip.startVoipServer(VOIP_PORT, '127.0.0.1');
 
@@ -79,7 +112,21 @@ function json(res, code, body) {
   res.end(raw);
 }
 
+// O `try` não é decoração. Este processo é o servidor de voz do teste: uma
+// exceção não tratada dentro de um handler de request derruba o Node inteiro, e
+// com ele o `voip-service` e todas as conexões vivas. Um erro ao RESPONDER uma
+// pergunta de diagnóstico não pode custar a sessão inteira que está sendo
+// diagnosticada.
 const server = http.createServer((req, res) => {
+  try {
+    handle(req, res);
+  } catch (e) {
+    console.error('[harness] handler falhou:', e && e.stack ? e.stack : e);
+    try { json(res, 500, { error: String(e && e.message ? e.message : e) }); } catch { /* resposta já iniciada */ }
+  }
+});
+
+function handle(req, res) {
   const url = new URL(req.url, `http://127.0.0.1:${HTTP_PORT}`);
   const actorId = Number.parseInt(url.searchParams.get('actorId'), 0);
 
@@ -100,20 +147,42 @@ const server = http.createServer((req, res) => {
     if (!Number.isFinite(actorId)) return json(res, 400, { error: 'actorId invalido' });
     const pos = ['x', 'y', 'z'].map((k) => Number.parseFloat(url.searchParams.get(k) || '0'));
     positions.set(actorId, pos);
+    // `cell` é opcional e persiste entre chamadas: mover sem informar não tira
+    // ninguém do interior em que estava. É o que permite testar isolamento
+    // (§13) — dois atores em coordenadas idênticas e células diferentes não
+    // podem se ouvir.
+    const cell = url.searchParams.get('cell');
+    if (cell) cells.set(actorId, cell);
     voip.tickProximity(); // aplica agora em vez de esperar o ticker de 2s
-    return json(res, 200, { actorId, pos });
+    return json(res, 200, { actorId, pos, cell: cells.get(actorId) || CELL_PADRAO });
   }
 
   if (url.pathname === '/state') {
+    const conectados = voip.getConnectedVoipActors();
     return json(res, 200, {
       ranges: VOICE_RANGES,
       positions: [...positions.entries()].map(([id, pos]) => ({
         actorId: id, hex: '0x' + id.toString(16), pos
       })),
-      connected: voip.getConnectedVoipActors().map((id) => '0x' + id.toString(16)),
-      audience: [...voip._audienceByActor.entries()].map(([id, list]) => ({
+      connected: conectados.map((id) => '0x' + id.toString(16)),
+      // A audiência vem do Voice Core, e não mais de um Map privado do
+      // `voip-service`. Ela saiu de lá em `5c057ba` ("a proximidade sai do
+      // voip-service e vira um nucleo que se mede"), e esta linha continuou
+      // lendo `voip._audienceByActor` — que passou a ser `undefined`.
+      //
+      // O efeito não era um campo vazio: era `TypeError` dentro do handler,
+      // que no Node derruba o PROCESSO. A única ferramenta de bancada que
+      // responde "quem ouve quem" matava o servidor de voz ao ser perguntada.
+      // Descoberto em 2026-08-14, no primeiro pareamento real do helper.
+      //
+      // `audienceFor` consulta a política antes de responder — então isto é a
+      // audiência de AGORA (PTT, mute, morte, mordaça incluídos), não a última
+      // calculada.
+      audience: conectados.map((id) => ({
         speaker: '0x' + id.toString(16),
-        listeners: list.map((l) => ({ actorId: '0x' + l.actorId.toString(16), volume: l.volume }))
+        listeners: (voip.voiceCore.audienceFor(id) || []).map((l) => ({
+          actorId: '0x' + l.actorId.toString(16), volume: l.volume
+        }))
       }))
     });
   }
@@ -131,7 +200,7 @@ const server = http.createServer((req, res) => {
     res.writeHead(200, { 'Content-Type': mime });
     res.end(data);
   });
-});
+}
 
 server.listen(HTTP_PORT, '127.0.0.1', () => {
   console.log(`[harness] voip-service   ws://127.0.0.1:${VOIP_PORT}`);

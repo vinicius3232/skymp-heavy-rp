@@ -52,11 +52,15 @@
  * Isso apaga a necessidade do `VOIP_DEBUG_EXPOSE_TICKET` — que é o blocker #4
  * registrado em `SKYVOICE_LIVEKIT_AUDIT.md` §12.
  *
- * ⚠️ **O lado do helper é C++ e NÃO está implementado.** Este módulo é a metade
- * do launcher: ele gera o token, monta os argumentos e sabe decidir versão,
- * integridade e rollback. O `--control-port`/`--pair` precisa existir no
- * `voice-helper/src/main.cpp` para o caminho fechar. Ver
- * `docs/technical/SKYVOICE_DEPLOYMENT.md`.
+ * ✅ **O lado C++ existe desde 2026-08-14** (`voice-helper/src/main.cpp`): o
+ * helper sobe um canal de loopback em `--control-port`, aceita um POST
+ * `/ticket` autorizado por `--pair` e só então abre o microfone. Antes disso
+ * este módulo montava argumentos que o helper REJEITAVA — ele saía com código 2
+ * antes de a primeira linha de log aparecer, e o launcher reportava sucesso.
+ * Ver `docs/technical/SKYVOICE_DEPLOYMENT.md`.
+ *
+ * ⚠️ O que ainda não existe é o **mensageiro**: quem faz esse POST deveria ser a
+ * CEF, e o `index.html` não o faz. Ver `SKYVOICE_E2E_ETAPA_5.md` §4.
  *
  * ─────────────────────────────────────────────────────────────────────────────
  * Por que `.mjs` puro e sem I/O
@@ -276,16 +280,28 @@ export function verifyHash(expected, actual) {
  * @param {number} args.controlPort   porta de loopback do canal de controle
  * @param {string} args.pairingToken  segredo desta execução
  * @param {string} [args.logLevel]
+ * @param {number} [args.parentPid]   pid do launcher, para a guarda de órfão
  * @returns {string[]}
  */
 export function helperArgs(args) {
-  const { controlPort, pairingToken, logLevel = 'info' } = args;
+  const { controlPort, pairingToken, logLevel = 'info', parentPid = 0 } = args;
   if (!Number.isInteger(controlPort) || controlPort <= 0 || controlPort > 65535) {
     throw new Error('[voice-dist] controlPort inválido');
   }
   if (typeof pairingToken !== 'string' || pairingToken.length < 16) {
     throw new Error('[voice-dist] pairingToken curto demais para ser segredo');
   }
+  const guarda = Number.isInteger(parentPid) && parentPid > 0
+    // O helper abre um handle deste pid e sai quando ele for sinalizado.
+    //
+    // `detached: false` no `spawn` NÃO faz isso no Windows: ele só impede um
+    // console próprio. Um launcher derrubado pelo gerenciador de tarefas — ou
+    // que trave — deixaria para trás um processo sem janela com o microfone
+    // aberto, e nenhum dos caminhos de saída do `main.ts` roda nesse caso.
+    // A guarda é a única linha de defesa que não depende de o launcher
+    // conseguir executar código na saída.
+    ? ['--parent-pid', String(parentPid)]
+    : [];
   return [
     // Loopback explícito, e não configurável. Um canal de controle que aceita a
     // rede é um canal por onde alguém de fora manda o helper falar.
@@ -293,6 +309,7 @@ export function helperArgs(args) {
     '--control-port', String(controlPort),
     '--pair', pairingToken,
     '--log-level', logLevel,
+    ...guarda,
     // PTT é o padrão, e o helper precisa DECLARAR que o fala. Um helper que não
     // declara recebe concessão de microfone aberto no servidor (dívida
     // registrada em SKYVOICE_CORE_ETAPA_3.md §11.2). Declarar aqui é o que
