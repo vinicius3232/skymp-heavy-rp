@@ -17,18 +17,29 @@
  * §7 do pedido, e `CONTRIBUTING.md` §3.6 ("evento de cliente é uma dica, não
  * uma prova").
  *
- * ─── Por que só `player` tem resolvedor ─────────────────────────────────────
+ * ─── Por que só `player` e `object` têm resolvedor ──────────────────────────
  *
- * Porque é o único com consumidor. `container`, `door`, `npc`, `object`,
- * `property` e `world_point` são vocabulário reservado no
- * `interaction-registry`; o dia em que um módulo precisar de um deles, ele
- * chama `registerResolver('container', fn)` no `initialize()` e nada aqui muda.
+ * Porque são os únicos com consumidor. `container`, `door`, `npc`, `property`
+ * e `world_point` continuam vocabulário reservado no `interaction-registry`;
+ * o dia em que um módulo precisar de um deles, ele chama
+ * `registerResolver('container', fn)` no `initialize()` e nada aqui muda.
  *
- * Escrever os seis agora seria escrever seis funções sem chamador, contra APIs
- * do SkyMP que este projeto nunca exercitou (`mp.get(id,'inventory')` continua
- * marcada **[DOC]** em `types/mp.d.ts` — ver `ARCHITECTURE.md` §1.4.9). É o
+ * `object` (desde o Minerador MVP, ver `docs/gameplay/MINING.md` §1) é o
+ * primeiro alvo que não é um ator: qualquer `MpObjectReference` do mundo,
+ * identificada pelo próprio FormId que o cliente reporta ao interagir — nunca
+ * um FormDesc digitado à mão. `mp.get(formId, 'locationalData')` é **[DOC]**
+ * em `types/mp.d.ts` (a interface `LocationalData` descreve posição "de um
+ * objeto", não "de um ator", e a assinatura de `get()` é genérica sobre
+ * `FormId`) — mas nunca foi exercitada por este projeto contra uma referência
+ * que não fosse ator. Decisão tomada com o usuário: confiar na documentação
+ * oficial e implementar, marcando isto como **assumido, não testado em
+ * jogo**, até a primeira validação manual em servidor real.
+ *
+ * Escrever os quatro restantes agora seria escrever funções sem chamador,
+ * contra APIs do SkyMP que este projeto nunca exercitou (`mp.get(id,'inventory')`
+ * continua marcada **[DOC]** e não testada — ver `ARCHITECTURE.md` §1.4.9). É o
  * mesmo critério registrado no cabeçalho do `module-registry` em 06/08/2026, e
- * a alternativa — seis resolvedores adivinhados — é pior que ausência, porque
+ * a alternativa — resolvedores adivinhados — é pior que ausência, porque
  * parece pronta.
  *
  * Um tipo sem resolvedor falha **fechado e por nome**: "tipo de alvo nao
@@ -61,11 +72,24 @@ function parseActorId(raw) {
 }
 
 /**
+ * Mesma forma de `parseActorId` — aceita `123`, `"123"`, `"0x7b"`, `"7B"` —
+ * com nome próprio porque aqui o número não é um ator, é o FormId de uma
+ * `MpObjectReference` qualquer que o cliente reportou ao interagir.
+ *
+ * @param {unknown} raw
+ * @returns {number|null}
+ */
+function parseFormId(raw) {
+  return parseActorId(raw);
+}
+
+/**
  * @typedef {object} AlvoResolvido
  * @property {string} type           o tipo declarado (já validado)
  * @property {string} id             identificador estável, para log e dedupe
  * @property {string} label          nome curto para a UI e para a auditoria
  * @property {number} [actorId]      quando o alvo é um ator no mundo
+ * @property {number} [formId]       quando o alvo é uma MpObjectReference qualquer
  * @property {number} [characterId]  quando o alvo é um personagem persistido
  * @property {number|null} [accountId]
  * @property {object} [character]    o registro que o servidor já tinha em mãos
@@ -127,6 +151,34 @@ function createTargetResolvers({ getCharacter, logger = console }) {
   });
 
   /**
+   * O alvo é uma `MpObjectReference` qualquer do mundo — um veio de mineração
+   * hoje, potencialmente qualquer objeto interativo amanhã.
+   *
+   * Diferente de `player`, o cliente aqui reporta o **FormId** de quem ele
+   * está mirando, não um FormDesc digitado. É o mesmo padrão de confiança que
+   * `player` já usa (o cliente indica o alvo, o servidor mede distância e
+   * decide o resto) — a diferença é só o tipo de objeto do outro lado.
+   *
+   * `assertRange` reaproveita `rangeUtils.assertRange` sem modificação: a
+   * implementação já era genérica sobre `mp.get(id, 'locationalData')`, nunca
+   * exigiu que o segundo id fosse um ator. Ver o aviso de procedência no
+   * cabeçalho deste arquivo — `locationalData` contra um objeto comum é
+   * **assumido a partir da doc oficial, não validado em jogo**.
+   */
+  resolvers.set(TARGET_TYPES.OBJECT, (rawTargetId) => {
+    const formId = parseFormId(rawTargetId);
+    if (formId === null) return null;
+
+    return {
+      type: TARGET_TYPES.OBJECT,
+      id: `object:${formId}`,
+      label: `0x${formId.toString(16)}`,
+      formId,
+      assertRange: (fromActorId, maxRange) => rangeUtils.assertRange(fromActorId, formId, maxRange)
+    };
+  });
+
+  /**
    * Registra um resolvedor para um tipo de alvo que ainda não tem.
    *
    * Chamado no `initialize()` de quem for o dono daquele tipo — `properties`
@@ -181,4 +233,4 @@ function createTargetResolvers({ getCharacter, logger = console }) {
   return { resolve, registerResolver, supportedTypes };
 }
 
-module.exports = { createTargetResolvers, parseActorId };
+module.exports = { createTargetResolvers, parseActorId, parseFormId };

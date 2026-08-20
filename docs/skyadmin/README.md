@@ -2,7 +2,7 @@
 
 Este diretório é o ponto de entrada para construir o painel administrativo e de staff do SkyMP Heavy RP. Ele não substitui a documentação existente: organiza as decisões e indica a fonte de verdade de cada tema.
 
-> **Leia antes: [`../research/ADMIN_PLATFORM_AUDIT.md`](../research/ADMIN_PLATFORM_AUDIT.md) (13/08/2026).**
+> **Leia antes: [`../admin/SKYADMIN_CURRENT_STATE.md`](../admin/SKYADMIN_CURRENT_STATE.md) (15/08/2026)** — o mapa funcionalidade a funcionalidade do que roda hoje, incluindo a administração de voz — e a auditoria que o precede, [`../research/ADMIN_PLATFORM_AUDIT.md`](../research/ADMIN_PLATFORM_AUDIT.md) (13/08/2026).
 > Este diretório descreve **intenção**; a auditoria mediu o **estado**. A §7 dela reconcilia marco a marco — dos seis marcos do [plano](IMPLEMENTATION_PLAN.md), só o Marco 1 tem entrega verificável. A única frase deste diretório que descreve o presente é a lista de "Estado atual" logo abaixo.
 > Os desdobramentos da auditoria vivem em [`../admin/`](../admin/ADMIN_PLATFORM.md) e em [ADR 005](../technical/ADR_005_ADMIN_RBAC.md), que decide o RBAC do Marco 2.
 

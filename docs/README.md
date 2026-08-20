@@ -17,8 +17,12 @@ Mapa dos documentos do projeto. Se você acabou de chegar, leia na ordem da prim
 | 0 | [CONSTITUICAO.md](CONSTITUICAO.md) | **A constituição de design.** O que o projeto é, o que nunca criar, e por que toda mecânica precisa responder "como isso gera histórias?". O Anexo A traz as tensões conhecidas dela. |
 | 1 | [QA_REPORT_2026-08.md](technical/QA_REPORT_2026-08.md) | **O estado real de cada componente**, incluindo o que não está pronto e o plano priorizado. É o documento mais honesto do projeto. |
 | 2 | [ARCHITECTURE.md](ARCHITECTURE.md) | Como banco, painel web, bot, API do jogo, launcher e gamemode conversam. |
-| 2.1 | [research/ADMIN_PLATFORM_AUDIT.md](research/ADMIN_PLATFORM_AUDIT.md) | **O estado real do painel de staff.** Doze rotas administrativas, zero verificações de permissão — e o que mais a auditoria de 13/08 encontrou. Leia antes de `skyadmin/`. |
-| 2.2 | [skyadmin/README.md](skyadmin/README.md) | Centro de orientação do painel de staff: escopo, arquitetura, plano, segurança, operação e referências. **É projeto, não estado** — ver a §7 da auditoria acima. |
+| 2.1 | [admin/AUTHORIZATION_MATRIX.md](admin/AUTHORIZATION_MATRIX.md) | **Quem pode o que, hoje.** Rota x capability x cargo minimo nos tres servicos, com as quatro negacoes e o que continua reservado. |
+| 2.2 | [admin/ADMIN_ACTION_PIPELINE.md](admin/ADMIN_ACTION_PIPELINE.md) | **Por onde toda acao administrativa passa.** As oito etapas, o envelope, os cinco desfechos, e a regra que sustenta tudo: identidade e alvo sao resolvidos pelo servidor, nunca aceitos do pedido. |
+| 2.3 | [admin/AUDIT_LOG.md](admin/AUDIT_LOG.md) | **Os cinco fluxos de registro, e a auditoria que virou tabela.** Por que `rp_chat` afogava a aba Audit Log em minutos, o que e coluna e o que e JSON, e a migration que nao toca em nada do que existe. |
+| 2.4 | [admin/SKYADMIN_CURRENT_STATE.md](admin/SKYADMIN_CURRENT_STATE.md) | **O estado da plataforma administrativa em 15/08.** Trinta funcionalidades mapeadas uma a uma, as três permissões sem porta, as tabelas mortas que o painel ainda lê, e o que deve ser reaproveitado em vez de reconstruído. Leia antes de `skyadmin/`. |
+| 2.5 | [research/ADMIN_PLATFORM_AUDIT.md](research/ADMIN_PLATFORM_AUDIT.md) | A auditoria de 13/08 que abriu a linha: doze rotas administrativas, zero verificações de permissão. Continua válida; o documento acima a estende. |
+| 2.6 | [skyadmin/README.md](skyadmin/README.md) | Centro de orientação do painel de staff: escopo, arquitetura, plano, segurança, operação e referências. **É projeto, não estado** — ver a §7 da auditoria acima. |
 | 3 | [../CONTRIBUTING.md](../CONTRIBUTING.md) | As regras que não são óbvias lendo o código. Quase todas existem porque alguém já quebrou aquilo. |
 | 4 | [../CHANGELOG.md](../CHANGELOG.md) | O que mudou em cada versão — e o que sabidamente não está pronto. |
 
@@ -167,6 +171,9 @@ Cada um é um serviço com documento próprio. **A etiqueta de estado é a infor
 | **Contratos** | Um jogador publica trabalho, outro aceita, o servidor move os septims. Sem NPC e sem fila de staff. | [gameplay/CONTRACTS.md](gameplay/CONTRACTS.md) |
 | **Dívida** | Registro selado e legível — **nunca** cobrança automática. | [gameplay/DEBT_SYSTEM.md](gameplay/DEBT_SYSTEM.md) |
 | **Crafting** | **PARKED.** Foi migrado para o Inventory Framework, e migrar **não** é reativar. | [gameplay/CRAFTING_SYSTEM.md](gameplay/CRAFTING_SYSTEM.md) |
+| **Profissões** | **LAB.** Core implementado (grant/revoke/rank/xp), atrás de `ENABLE_PROFESSION_SERVICE`. Nenhuma profissão tem gameplay por trás ainda. | [gameplay/PROFESSION_FRAMEWORK.md](gameplay/PROFESSION_FRAMEWORK.md) |
+| **Nós de recurso** | Motor genérico implementado (capacidade, regen, coleta atômica). Primeiro consumidor: Minerador (abaixo). | [gameplay/RESOURCE_NODE_FRAMEWORK.md](gameplay/RESOURCE_NODE_FRAMEWORK.md) |
+| **Minerador** | **LAB.** Interação `mining.mine` (alvo `object`, distância medida pelo Interaction Framework), atrás de `ENABLE_MINING_SERVICE`. Suposição não validada em jogo: `mp.get(formId,'locationalData')` contra objeto comum. | [gameplay/MINING.md](gameplay/MINING.md) |
 
 ---
 
@@ -187,6 +194,10 @@ Cada um é um serviço com documento próprio. **A etiqueta de estado é a infor
 
 | Documento | Sobre |
 |---|---|
+| [admin/AUDIT_LOG.md](admin/AUDIT_LOG.md) | **APPLICATION LOG, AUDIT LOG, SECURITY EVENT, GAMEPLAY EVENT e METRIC** — o que cada um e, onde vive e por que. A tabela `audit_events` com colunas indexadas, busca em onze eixos, e o backfill que copia sem mover. |
+| [admin/ADMIN_ACTION_PIPELINE.md](admin/ADMIN_ACTION_PIPELINE.md) | **A camada comum das acoes administrativas.** Oito etapas, um envelope, cinco desfechos; o que cada superficie pode afirmar e o que o servidor sempre reresolve. Inclui as cinco acoes de voz que existiam e ninguem conseguia invocar. |
+| [admin/AUTHORIZATION_MATRIX.md](admin/AUTHORIZATION_MATRIX.md) | **A matriz que vale hoje.** Toda rota dos tres servicos, a capability que a protege e o cargo minimo; as 20 capabilities ativas e as 10 reservadas; o que mudou para o moderador. |
+| [admin/SKYADMIN_CURRENT_STATE.md](admin/SKYADMIN_CURRENT_STATE.md) | **Estado atual (15/08).** Mapa por funcionalidade — backend, frontend, permissão, auditoria, banco, status, problema — das trinta superfícies administrativas, da whitelist à voz. Inclui a administração de VOIP, que é posterior à auditoria de 13/08. |
 | [research/ADMIN_PLATFORM_AUDIT.md](research/ADMIN_PLATFORM_AUDIT.md) | **Auditoria de 13/08.** O que existe hoje: dois sistemas de permissão que não se conhecem, três permissões que nada verifica, ban construído pela metade, e o teto real do que a API `mp` permite fazer com jogador conectado. |
 | [admin/ADMIN_PLATFORM.md](admin/ADMIN_PLATFORM.md) | O painel alvo: catorze módulos, cinco fases, o fluxo de uma ação — e por que `server.restart` e `modules.toggle` a quente ficam de fora. |
 | [admin/RBAC.md](admin/RBAC.md) | Catálogo de ~40 permissões, seis cargos, modelo de dados, contrato do middleware e a política de Discord. |

@@ -6,7 +6,7 @@
   "scripts": {
     "start": "node server.js",
     "dev": "node server.js",
-    "test": "node --test server.test.js"
+    "test": "node --test server.test.js permissions.test.js audit-search.test.js"
   },
   "dependencies": {
     "cors": "^2.8.5",

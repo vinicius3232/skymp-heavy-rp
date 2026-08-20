@@ -381,6 +381,10 @@ describe('a matriz cobre todo comando de staff que existe', () => {
     // Handlers que não são comandos de staff sujeitos a permissão.
     const naoSaoComandos = new Set([
       'registerStaffRole', 'removeStaffRole', 'hasPermission', 'getRole', 'auditLog',
+      // Irmã de `hasPermission`: devolve a decisão com o motivo, para quem
+      // precisa AUDITAR a negação. Não é comando; é a mesma pergunta com
+      // resposta mais larga. Ver core/permissions.js.
+      'checkPermission',
       // Injeção de dependência feita no boot pelo `voip-service`, não comando.
       // O `admin-service` não importa o Voice Core — a direção da dependência é
       // staff ← voz, nunca o contrário.

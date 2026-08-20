@@ -13,9 +13,11 @@ por pessoa** que precisa responder, meses depois e para alguém que não estava
 lá: *o que aconteceu, quem decidiu, com base em quê, e o que foi feito.*
 
 Hoje o servidor responde a primeira e a terceira metade dessa pergunta. Um
-`/kick` grava `audit_logs` com o motivo dentro de um campo de texto livre e
-manda uma linha para o Discord. Não existe nada que ligue o kick de hoje ao warn
-da semana passada e ao ban de amanhã.
+`/kick` grava `audit_events` — com o motivo em coluna própria e obrigatório
+desde 15/08/2026 — e manda uma linha para o Discord. Não existe nada que ligue o
+kick de hoje ao warn da semana passada e ao ban de amanhã: `correlationId`
+liga invocações da mesma decisão, não decisões diferentes sobre a mesma pessoa.
+O histórico por jogador continua sendo consulta (`?accountId=`), não entidade.
 
 O **caso** é a coisa que liga.
 
@@ -51,8 +53,8 @@ Caso #142
 | `created_at` / `resolved_at` | |
 
 **Ações** (`moderation_actions`) referenciam o caso e carregam o que a ação tem
-de próprio: tipo, executor, motivo, duração, resultado, `request_id` e a linha de
-`audit_logs` correspondente.
+de próprio: tipo, executor, motivo, duração, resultado, `correlationId` e o
+`event_id` da linha de `audit_events` correspondente.
 
 ### 2.1 Tipos de caso
 
@@ -123,7 +125,7 @@ BEGIN;
   UPDATE accounts SET status = 'banned' WHERE id = ?;
   UPDATE game_sessions SET revoked_at = NOW()
     WHERE account_id = ? AND revoked_at IS NULL;            -- corta a reconexão
-  INSERT INTO audit_logs (...);                             -- mesma transação
+  INSERT INTO audit_events (...);                           -- mesma transação
 COMMIT;
 ```
 
@@ -255,7 +257,10 @@ Canal de entrada (Discord, formulário, ticket) fica em aberto — ver
 
 ## 8. Auditoria: o que toda ação grava
 
-Contra a lista pedida, com o que muda em `audit_logs` ([auditoria §4.7](../research/ADMIN_PLATFORM_AUDIT.md)):
+Contra a lista pedida. A coluna "Depois" foi **entregue em 15/08/2026** por
+`audit_events` — ver [`AUDIT_LOG.md`](AUDIT_LOG.md); a coluna "Hoje" descreve o
+`audit_logs`, que continua sendo o fluxo de evento de jogo
+([auditoria §4.7](../research/ADMIN_PLATFORM_AUDIT.md)):
 
 | Campo | Hoje | Depois |
 |---|---|---|
@@ -275,12 +280,19 @@ nada; o `403` do painel não escreve nada. Sem isso, "alguém está testando
 permissões que não tem" é invisível — e esse é o sinal que se quer ver antes do
 incidente.
 
-**Ninguém apaga `audit_logs` pelo painel.** Não existe rota de escrita destrutiva
-sobre a tabela e não vai existir. A proteção real, porém, é de banco: hoje um
-único usuário SQL serve painel, `game-api` e gamemode, com DML completa. Fechar
-isso — usuário com `INSERT`/`SELECT` e sem `DELETE`/`UPDATE` em `audit_logs` — é
-item do [`ADMIN_SECURITY_MATRIX`](../testing/ADMIN_SECURITY_MATRIX.md) §5, e é a
-diferença entre "não há caminho" e "não é possível".
+**Ninguém apaga o registro pelo painel.** Não existe rota de escrita destrutiva
+sobre as tabelas de registro e não vai existir. A proteção real, porém, é de
+banco: hoje um único usuário SQL serve painel, `game-api` e gamemode, com DML
+completa. Fechar isso — usuário com `INSERT`/`SELECT` e sem `DELETE`/`UPDATE` —
+é item do [`ADMIN_SECURITY_MATRIX`](../testing/ADMIN_SECURITY_MATRIX.md) §5, e é
+a diferença entre "não há caminho" e "não é possível".
+
+> ⚠️ **A tabela a proteger é `audit_events`, não `audit_logs`.** Desde 15/08/2026
+> a auditoria administrativa e as decisões de acesso vivem em `audit_events`;
+> `audit_logs` continua existindo e passou a ser o fluxo de evento de jogo (chat,
+> combate, morte). Um controle que tranque só a segunda deixa a auditoria com DML
+> completa — e dá a sensação de proteção sobre a tabela errada, que é pior do que
+> não ter controle nenhum. Ver [`AUDIT_LOG.md`](AUDIT_LOG.md).
 
 ---
 

@@ -63,6 +63,16 @@ const SPEC = {
 
   'economy.startingGold': { ...num(0, 1000000), default: 0, usedBy: 'whitelist.js (ouro inicial do personagem)' },
 
+  'profession.maxPerCharacter': { ...num(1, 20), default: 3, usedBy: 'profession-service.js (grantProfession/reactivateProfession)' },
+  'profession.maxRank': { ...num(0, 20), default: 3, usedBy: 'profession-service.js (setProfessionRank)' },
+
+  'mining.xpPerGather': { ...num(0, 1000), default: 2, usedBy: 'mining-service.js (registerMiningInteractions)' },
+  // Alcance físico do veio, não de conversa — não reaproveita `core/proximity-ranges.js`
+  // (aquelas são distâncias de fala/voz). Valor de julgamento, não descoberto em
+  // nenhuma fonte SkyMP: perto o suficiente pra exigir estar de fato ao lado do
+  // veio, sem exigir pixel-perfect. Ver docs/gameplay/MINING.md §1.
+  'mining.maxDistance': { ...num(50, 1000), default: 200, usedBy: 'mining-service.js (registerMiningInteractions)' },
+
   // ── Voz: como o estado do personagem muda a voz ────────────────────────────
   //
   // Nenhum destes números está escrito na `VoicePolicyEngine`. Ela lê daqui, e

@@ -162,11 +162,11 @@ torna a parte mais frágil.
 
 | Controle | Estado | Por que importa |
 |---|---|---|
-| Usuário SQL do painel sem `DELETE`/`UPDATE` em `audit_logs` | ❌ um usuário para tudo | é a diferença entre "não há rota" e "não é possível" |
+| Usuário SQL do painel sem `DELETE`/`UPDATE` em **`audit_events`** (e em `audit_logs`) | ❌ um usuário para tudo | é a diferença entre "não há rota" e "não é possível". **A tabela que importa é `audit_events`** — desde 15/08/2026 é lá que vivem a auditoria administrativa e as decisões de acesso. Trancar só `audit_logs` protege o chat e deixa a auditoria aberta |
 | Usuário SQL do `game-api` restrito às tabelas que usa | ❌ | menor privilégio |
 | `FK` de `staff_roles.role` para o catálogo de cargos | ❌ | fecha o cargo-fantasma da §2.2 |
 | `FK` de permissão para o catálogo | ❌ | impede permissão inventada em produção |
-| Backup e restauração ensaiados | ❌ | `audit_logs` é o registro de última instância |
+| Backup e restauração ensaiados | ❌ | **`audit_events`** é o registro de última instância (era `audit_logs` até 15/08/2026) |
 
 ---
 
@@ -201,7 +201,8 @@ Nenhuma pessoa da staff além do dono recebe acesso ao painel antes de:
 3. §2.3 — nenhuma permissão órfã, nenhuma permissão inventada;
 4. sessão em MariaDB com regeneração no login;
 5. auditoria de negação funcionando;
-6. §5 linhas 1 e 3 (privilégio do usuário SQL sobre `audit_logs`, FK de cargo).
+6. §5 linhas 1 e 3 (privilégio do usuário SQL sobre `audit_events` — a tabela
+   que guarda a auditoria desde 15/08/2026 —, FK de cargo).
 
 Os itens 1–5 são código e teste. O item 6 é operação, e é o único que não se
 verifica rodando `npm test` — motivo pelo qual está escrito aqui e não só na
