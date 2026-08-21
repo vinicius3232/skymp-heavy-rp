@@ -10,70 +10,40 @@ const db = require('./database');
 const commands = require('./commands');
 const identity = require('./identity-service');
 const moderationLog = require('./core/moderation-log');
+// O registro COMPARTILHADO do processo. O Voice Core lê o mesmo; passá-lo entre
+// os dois exigiria que o sistema de staff conhecesse o de voz, o que é a
+// dependência na direção errada. Ver core/voice/voice-staff-mute.js.
+const { sharedVoiceStaffMute: voiceStaffMute } = require('./core/voice/voice-staff-mute');
 const { actorRef } = require('./core/papyrus');
 const skymp = require('./core/skymp-adapter');
+// O catálogo. Este arquivo deixou de ser o dono da tabela cargo→permissão e
+// passou a ser um consumidor dela, como o painel e o bot. Ver core/permissions.js.
+const permissions = require('./core/permissions');
 
-// Roles e permissões por nível
+// ─── Onde foi parar a tabela que morava aqui ─────────────────────────────────
 //
-// `manage_recipes` existe separada de `add_item` de propósito. `add_item` é um
-// ato pontual e auditado — "dê este item a este jogador", raio de alcance de uma
-// pessoa. Uma receita é uma regra permanente que **todo** jogador usa, quantas
-// vezes quiser: é uma casa da moeda, não um presente. Reaproveitar `add_item`
-// para receita faria quem auditasse "quem pode add_item?" receber a resposta
-// errada sobre quem pode reformar a economia de crafting — que é a mesma classe
-// do nível numérico que esta tabela já pagou caro para eliminar: uma permissão
-// que significa outra coisa que não o que o nome diz.
+// `ROLE_PERMISSIONS` vivia neste arquivo, e por isso o painel web não conseguia
+// consultá-la: ele lia a mesma linha de `staff_roles` e respondia "tem cargo?
+// libera tudo". A granularidade existia do lado que ninguém consegue usar hoje.
 //
-// `reveal_identity` (07/08/2026) nasce pelo mesmo critério e contra o mesmo
-// candidato fácil. O óbvio seria pendurar a revelação de identidade em
-// `view_audit` — "staff lendo registro" —, e é errado por duas razões
-// independentes: `view_audit` significa ler o que a STAFF fez, não furar o
-// anonimato de um JOGADOR, então quem auditasse "quem pode view_audit?"
-// receberia a resposta errada sobre quem pode desmascarar; e `view_audit` é de
-// moderador, então reaproveitá-la alargaria o poder para a linha de frente
-// inteira sem que ninguém tivesse decidido isso.
+// A tabela agora é `core/permissions.js`, e a justificativa longa de cada
+// decisão de cargo — por que `manage_recipes` não é `add_item`, por que
+// `reveal_identity` não é `view_audit`, por que `voice_mute` é de moderador e
+// `run_world_probe` não é — foi junto com ela, porque é lá que ela ajuda quem
+// for mexer em quem pode o quê.
 //
-// Fica em `admin`/`owner`, fora do moderador, pelo mesmo andar de `add_item`,
-// `set_gold` e `retire_character`. O argumento não é o de patrimônio da §7.4 —
-// revelar não move nada. É que **nenhuma outra ação de staff é irreversível do
-// jeito que esta é**: um kick acaba quando a pessoa reconecta, ouro dado volta
-// por outro `/setgold`, e até o `/permakill` é soft-delete. Uma identidade
-// revelada não desrevela — ela passa a morar na cabeça de quem leu, e o
-// `audit_logs` registra que aconteceu sem poder desfazer. O valor do sistema de
-// anonimato é inversamente proporcional a quantas pessoas conseguem contorná-lo,
-// e moderador é o cargo mais numeroso e menos filtrado.
-//
-// O que fica em aberto, no formato da PARKED_SERVICES_DECISION.md §7.4: se a
-// operação real mostrar que denúncia de metagaming chega mais rápido do que
-// admin responde, a resposta NÃO é dar `reveal_identity` ao moderador — é
-// desenhar uma variante com escopo (revelar só quem é parte de uma denúncia
-// aberta). Alargar o cargo resolveria a fila criando o problema que a permissão
-// existe para evitar.
-//
-// `run_world_probe` (08/08/2026) cobre os instrumentos de observação da Fase 0 —
-// `/censofauna` e `/sondacadaver`, as Peças 1 e 2 da §16 do
-// `HOSTILE_MOB_ACTIVATION_DECISION.md`. Nasce pelo mesmo critério das duas
-// acima, e contra o mesmo candidato fácil.
-//
-// O óbvio seria `view_audit` — "staff olhando o servidor" —, e é errado pela
-// razão de sempre: `view_audit` significa ler o que a STAFF fez, não vasculhar o
-// mundo nem escrever no inventário de um ator. Quem auditasse "quem pode
-// view_audit?" receberia a resposta errada sobre quem pode esvaziar um cadáver.
-//
-// Fica fora do moderador porque uma das duas ferramentas **escreve**: a sonda
-// esvazia o inventário do ator alvo para provar que a escrita funciona, e
-// restaura em seguida. A restauração pode falhar. O censo, sozinho, seria
-// inofensivo o bastante para moderador — mas separar em duas permissões daria a
-// este projeto uma permissão a mais para justificar sem que ninguém tivesse
-// pedido, e as duas ferramentas rodam na mesma sessão, pela mesma pessoa.
-const ROLE_PERMISSIONS = {
-  moderator: ['kick', 'teleport', 'view_audit', 'manage_whitelist'],
-  admin:     ['kick', 'teleport', 'view_audit', 'manage_whitelist', 'ban', 'add_item', 'set_gold', 'retire_character', 'manage_recipes', 'reveal_identity', 'run_world_probe'],
-  owner:     ['kick', 'teleport', 'view_audit', 'manage_whitelist', 'ban', 'add_item', 'set_gold', 'manage_staff', 'retire_character', 'manage_recipes', 'reveal_identity', 'run_world_probe']
-};
+// O que ficou aqui é o que sempre foi deste arquivo: o cache por `actorId`, o
+// ciclo de vida dele (login/logout) e os comandos.
 
-// Cache em memória: actorId → { role, permissions: Set<string> }
-// Carregado na whitelist a partir da tabela staff_roles (não de vip_level)
+// Cache em memória: actorId → { role }
+//
+// Guarda o CARGO CRU, não o conjunto de permissões resolvido. A diferença
+// importa: resolver no login congelaria a decisão no momento em que o jogador
+// entrou, e quem editasse o catálogo passaria a ter um servidor onde metade da
+// staff opera pela tabela velha até desconectar. Resolver na pergunta custa uma
+// busca em array de vinte itens e não tem esse modo de falha.
+//
+// Carregado da tabela `staff_roles` — nunca de `vip_level`.
 const staffCache = new Map();
 
 /**
@@ -96,9 +66,27 @@ async function registerStaffRole(actorId, accountId) {
     }
 
     const role = rows[0].role;
-    const permissions = new Set(ROLE_PERMISSIONS[role] || []);
-    staffCache.set(actorId, { role, permissions });
-    console.log(`[admin] Actor ${actorId.toString(16)} registrado como staff (role: ${role}, permissões: ${[...permissions].join(', ')})`);
+    staffCache.set(actorId, { role });
+
+    // Cargo que o catálogo não conhece grita, e grita aqui — no login, uma vez,
+    // e não a cada comando negado.
+    //
+    // Antes ele passava em silêncio: `ROLE_PERMISSIONS[role] || []` virava um
+    // `Set` vazio e a pessoa entrava com um cargo que negava tudo sem que nada
+    // dissesse por quê. Do outro lado do muro o painel fazia `rows.length !== 0`
+    // e liberava tudo — o mesmo `role='support'` produzia acesso total à web e
+    // zero em jogo, e nenhum dos dois lados reclamava. Ver
+    // `docs/admin/SKYADMIN_CURRENT_STATE.md` §4.2.
+    const concedidas = permissions.capabilitiesForRole(role);
+    if (concedidas.length === 0) {
+      console.error(
+        `[admin] Actor ${actorId.toString(16)} tem cargo '${role}' em staff_roles, e o catálogo NAO conhece esse cargo. ` +
+        `Ele nega tudo, em jogo e no painel. Cargos válidos: ${permissions.ROLES.join(', ')}. ` +
+        `Ver core/permissions.js.`
+      );
+      return;
+    }
+    console.log(`[admin] Actor ${actorId.toString(16)} registrado como staff (role: ${role}, ${concedidas.length} permissões: ${concedidas.join(', ')})`);
   } catch (err) {
     console.error(`[admin] Erro ao carregar cargo de staff para account ${accountId}:`, err.message);
   }
@@ -112,49 +100,70 @@ function removeStaffRole(actorId) {
   staffCache.delete(actorId);
 }
 
-/** Toda permissão que existe, derivada dos cargos. Fonte da validação abaixo. */
-const KNOWN_PERMISSIONS = new Set(Object.values(ROLE_PERMISSIONS).flat());
-
 /**
  * Verifica se um ator tem uma permissão específica.
  *
+ * A assinatura não mudou, e os nomes antigos continuam valendo: `kick`,
+ * `set_gold` e os outros onze são traduzidos por `LEGACY_ALIASES` antes de
+ * qualquer validação. Nenhum sítio de chamada precisou mudar — inclusive os dos
+ * módulos PARKED, que ninguém está olhando e que já foram, uma vez, onde um bug
+ * de permissão sobreviveu a uma suíte inteira.
+ *
  * @param {number} actorId
- * @param {string} permission - 'kick', 'ban', 'teleport', 'add_item', 'set_gold', etc.
+ * @param {string} permission  `players.kick`, `economy.adjust`, … ou o nome legado
  * @returns {boolean}
  *
- * Sobre a validação do argumento: doze chamadas nos módulos PARKED passam um
- * NÚMERO (`hasPermission(actorId, 20)`), herança de um modelo antigo de níveis
- * de staff. Como `permissions` é um `Set` de strings, `Set.has(20)` é sempre
- * `false` — a checagem "funcionava" no sentido de nunca explodir, e negava
- * tudo em silêncio.
+ * Sobre gritar em vez de negar calado: doze chamadas nos módulos PARKED passavam
+ * um NÚMERO (`hasPermission(actorId, 20)`), herança de um modelo de níveis que
+ * não existe mais — e negavam tudo em silêncio, inclusive para `owner`. O caso
+ * oposto é igualmente perigoso: quem escreve `hasPermission(actorId,
+ * 'manage_factions')` acha que criou uma regra e criou uma porta que nunca abre.
  *
- * Um nome de permissão que não existe é igualmente perigoso na direção
- * oposta: quem escreve `hasPermission(actorId, 'manage_factions')` acha que
- * criou uma regra, e criou uma porta que nunca abre.
+ * Agora há um terceiro caso, e ele é o mais fácil de ler errado: uma permissão
+ * **reservada** (`players.ban`, `inventory.remove`, …). O nome existe no
+ * catálogo, o poder não — então ela nega para todo mundo, `owner` incluído, e o
+ * log diz exatamente isso em vez de deixar parecer falta de cargo.
  *
- * Nos dois casos preferimos gritar no log a negar caladamente. Não lançamos
- * exceção porque isso derrubaria o comando do jogador por um erro de
- * programação — negar é o resultado seguro, o log é o que faz alguém corrigir.
+ * Não lançamos exceção em nenhum dos casos: isso derrubaria o comando do jogador
+ * por um erro de programação. Negar é o resultado seguro; o log é o que faz
+ * alguém corrigir.
  */
 function hasPermission(actorId, permission) {
-  if (typeof permission !== 'string') {
-    console.error(
-      `[admin] hasPermission recebeu ${typeof permission} (${JSON.stringify(permission)}) em vez de um nome de permissão. ` +
-      `Provavelmente um nível numérico legado — use um destes: ${[...KNOWN_PERMISSIONS].join(', ')}. Negando.`
-    );
-    return false;
-  }
-  if (!KNOWN_PERMISSIONS.has(permission)) {
-    console.error(
-      `[admin] hasPermission recebeu a permissão desconhecida '${permission}'. ` +
-      `Nenhum cargo a concede, então isso nega sempre. Conhecidas: ${[...KNOWN_PERMISSIONS].join(', ')}.`
-    );
-    return false;
+  const staff = staffCache.get(actorId);
+  const decisao = permissions.decide(staff ? staff.role : null, permission);
+
+  // Erro de programação — nome errado, forma errada, ou porta que ainda não
+  // existe — é barulho. Falta de cargo e cargo sem a permissão são operação
+  // normal e ficam quietos: eles acontecem toda vez que um jogador comum digita
+  // um comando de staff, e um log por tentativa viraria ruído que se aprende a
+  // ignorar. Quem precisa vê-los é o `audit_logs`, e é o painel que os grava.
+  /** @type {string[]} */
+  const barulhentos = [
+    permissions.DENIAL.MALFORMED_PERMISSION,
+    permissions.DENIAL.UNKNOWN_PERMISSION,
+    permissions.DENIAL.RESERVED_PERMISSION,
+    permissions.DENIAL.UNKNOWN_ROLE
+  ];
+  if (!decisao.allowed && barulhentos.includes(decisao.reason)) {
+    console.error(`[admin] hasPermission negou: ${permissions.explain(decisao)}.`);
   }
 
+  return decisao.allowed;
+}
+
+/**
+ * A decisão completa, com o motivo. Existe para quem precisa **auditar** a
+ * negação — hoje o painel, amanhã qualquer superfície de `security.review`.
+ *
+ * O gamemode continua usando o booleano: um comando de chat negado responde ao
+ * jogador e não tem para onde levar o motivo.
+ *
+ * @param {number} actorId
+ * @param {string} permission
+ */
+function checkPermission(actorId, permission) {
   const staff = staffCache.get(actorId);
-  if (!staff) return false;
-  return staff.permissions.has(permission);
+  return permissions.decide(staff ? staff.role : null, permission);
 }
 
 /**
@@ -183,10 +192,19 @@ async function auditLog(actorAccountId, targetAccountId, action, details) {
 
 /**
  * /anim [actorId] [animName] - Reproduz animação em ator (para eventos RP)
- * Permissão: 'teleport' (nível moderador+)
+ * Permissão: `players.animate` (moderador+).
+ *
+ * Era `teleport`, e essa é a correção mais silenciosa deste commit: uma
+ * permissão que significava outra coisa que não o que o nome diz — exatamente o
+ * defeito que o catálogo gasta parágrafos argumentando contra em `economy.recipes`
+ * e `identity.reveal`. Quem auditasse "quem pode teleportar?" recebia a resposta
+ * errada sobre quem pode fazer um personagem se mexer sozinho.
+ *
+ * Ninguém perdeu poder: os dois cargos que tinham `teleport` receberam as duas
+ * capabilities. O que mudou é que a pergunta passou a ter resposta própria.
  */
 async function playAnimation(actorId, targetActorId, animName) {
-  if (!hasPermission(actorId, 'teleport')) {
+  if (!hasPermission(actorId, 'players.animate')) {
     sendDenied(actorId);
     return;
   }
@@ -568,10 +586,261 @@ function sendDenied(actorId) {
   commands.sendNotification(actorId, '[Staff] Permissão negada.');
 }
 
+/**
+ * `/calar [actorId] [motivo]` — silencia a voz de um personagem.
+ * Permissão: `voice_mute`.
+ *
+ * ─── O que ele NÃO é ────────────────────────────────────────────────────────
+ *
+ * Não é o mute do jogador (`voice-state.setMuted`), que é conforto e a pessoa
+ * desfaz sozinha. Não é kick, não é ban, não é estado de personagem. É uma
+ * condição de voz, componível com todas as outras, e a pessoa **continua
+ * ouvindo** a cena — senão a punição vira desconexão disfarçada.
+ *
+ * ─── Não persiste, e isso está registrado ───────────────────────────────────
+ *
+ * O silêncio some no restart do servidor. Ver o cabeçalho de
+ * `core/voice/voice-staff-mute.js`.
+ *
+ * @param {number} actorId staff
+ * @param {number} targetActorId alvo
+ * @param {string} reason
+ * @param {number|null} [durationMinutes] `null` = até `/descalar`
+ */
+async function voiceMute(actorId, targetActorId, reason, durationMinutes = null) {
+  if (!hasPermission(actorId, 'voice_mute')) {
+    sendDenied(actorId);
+    return { ok: false, reason: 'sem permissão' };
+  }
+
+  const charData = commands.getActiveCharacterData(actorId);
+  const targetData = commands.getActiveCharacterData(targetActorId);
+  if (!targetData) {
+    commands.sendNotification(actorId, 'Alvo invalido.');
+    return { ok: false, reason: 'alvo sem personagem ativo' };
+  }
+
+  const durationMs = Number.isFinite(durationMinutes) && durationMinutes > 0
+    ? durationMinutes * 60_000
+    : null;
+
+  voiceStaffMute.mute(targetData.characterId, {
+    byCharacterId: charData ? charData.characterId : null,
+    reason,
+    durationMs
+  });
+
+  await auditLog(
+    charData?.accountId, targetData?.accountId, 'staff:voice_mute',
+    `role=${getRole(actorId)} reason=${reason} duration=${durationMinutes ?? 'indefinida'}`
+  );
+
+  commands.sendNotification(targetActorId, `Sua voz foi silenciada pela staff: ${reason}`);
+  commands.sendNotification(actorId, `Voz de ${nomeParaLog(targetData, targetActorId)} silenciada.`);
+  console.log(`[admin] ${actorId.toString(16)} (${getRole(actorId)}) silenciou a voz de ${targetActorId.toString(16)}: ${reason}`);
+
+  moderationLog.notify({
+    kind: 'voice_mute',
+    target: nomeParaLog(targetData, targetActorId),
+    moderator: nomeParaLog(charData, actorId),
+    reason
+  });
+
+  return { ok: true };
+}
+
+/**
+ * `/descalar [actorId]` — devolve a voz.
+ * Permissão: `voice_mute` — a mesma que tirou. Uma permissão separada para
+ * desfazer criaria a situação em que quem silenciou não pode reverter.
+ *
+ * @param {number} actorId staff
+ * @param {number} targetActorId alvo
+ */
+async function voiceUnmute(actorId, targetActorId) {
+  if (!hasPermission(actorId, 'voice_mute')) {
+    sendDenied(actorId);
+    return { ok: false, reason: 'sem permissão' };
+  }
+
+  const charData = commands.getActiveCharacterData(actorId);
+  const targetData = commands.getActiveCharacterData(targetActorId);
+  if (!targetData) {
+    commands.sendNotification(actorId, 'Alvo invalido.');
+    return { ok: false, reason: 'alvo sem personagem ativo' };
+  }
+
+  const result = voiceStaffMute.unmute(targetData.characterId);
+  await auditLog(charData?.accountId, targetData?.accountId, 'staff:voice_unmute', `role=${getRole(actorId)}`);
+
+  if (result.changed) commands.sendNotification(targetActorId, 'Sua voz foi liberada pela staff.');
+  commands.sendNotification(actorId, result.changed
+    ? `Voz de ${nomeParaLog(targetData, targetActorId)} liberada.`
+    : 'Esse personagem nao estava silenciado.');
+
+  return { ok: true, changed: result.changed };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Diagnóstico e ciclo de vida da voz
+//
+// As três ações abaixo compartilham uma decisão: elas mexem no TRANSPORTE de voz
+// de alguém, nunca no personagem e nunca na presença no jogo. Um cliente de voz
+// travado — cadeia de áudio duplicada, sessão zumbi, helper que parou de
+// responder — se resolve derrubando a voz, e derrubar o jogador junto seria uma
+// punição que ele não recebeu.
+//
+// Por isso elas ficam em `voice_mute` e não em `kick`: quem pode calar pode
+// destravar, e quem pode expulsar é outra conversa.
+//
+// **Toda uma delas gera audit log, inclusive a consulta.** Consultar o
+// diagnóstico de um jogador é olhar o estado de voz dele; num sistema de
+// moderação, quem olhou também é registro.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Injeção do diagnóstico.
+ *
+ * O `admin-service` NÃO importa o Voice Core. A direção da dependência é a
+ * mesma que `voice-staff-mute` protege: staff não conhece voz. Quem liga os dois
+ * é o `voip-service`, que já é dono do Voice Core, chamando isto no boot.
+ *
+ * Sem injeção, as três ações respondem "voz não disponível" — que é a verdade
+ * num servidor com `ENABLE_VOIP_SERVICE=false`.
+ *
+ * @type {{forActor: Function, overview: Function, roster: Function, disconnect: Function, forceReconnect: Function, summaryLine: Function}|null}
+ */
+let voiceDiagnostics = null;
+
+/** @param {any} diagnostics */
+function bindVoiceDiagnostics(diagnostics) {
+  voiceDiagnostics = diagnostics;
+}
+
+function _semVoz(actorId) {
+  commands.sendNotification(actorId, 'O sistema de voz nao esta ativo neste servidor.');
+  return { ok: false, reason: 'voz não disponível' };
+}
+
+/**
+ * `/vozdiag [actorId]` — o estado de voz de um jogador, com o motivo.
+ *
+ * Permissão: `voice_mute`. Responde "por que fulano não está sendo ouvido?", que
+ * sem isto se responde abrindo o log do servidor com `grep`.
+ *
+ * @param {number} actorId staff
+ * @param {number} targetActorId alvo
+ */
+async function voiceDiagnose(actorId, targetActorId) {
+  if (!hasPermission(actorId, 'voice_mute')) {
+    sendDenied(actorId);
+    return { ok: false, reason: 'sem permissão' };
+  }
+  if (!voiceDiagnostics) return _semVoz(actorId);
+
+  const charData = commands.getActiveCharacterData(actorId);
+  const targetData = commands.getActiveCharacterData(targetActorId);
+  const report = voiceDiagnostics.forActor(targetActorId);
+  const resumo = voiceDiagnostics.summaryLine(targetActorId);
+
+  await auditLog(
+    charData?.accountId, targetData?.accountId, 'staff:voice_diagnostics',
+    `role=${getRole(actorId)} ${resumo}`
+  );
+
+  commands.sendNotification(actorId,
+    `Voz de ${nomeParaLog(targetData, targetActorId)}: ` +
+    `${report.voiceConnected ? 'conectada' : 'DESCONECTADA'} (${report.reconnectState}), ` +
+    `modo ${report.voiceMode ?? '-'}, ` +
+    `${report.staffMuted ? 'SILENCIADA pela staff, ' : ''}` +
+    `${report.canSpeakNow ? 'pode falar' : `nao pode falar: ${report.reason}`}`
+  );
+  console.log(`[admin] ${actorId.toString(16)} consultou voz de ${targetActorId.toString(16)}: ${resumo}`);
+
+  return { ok: true, report };
+}
+
+/**
+ * `/vozdesconectar [actorId] [motivo]` — derruba a voz sem tirar do jogo.
+ *
+ * @param {number} actorId staff
+ * @param {number} targetActorId alvo
+ * @param {string} [reason]
+ */
+async function voiceDisconnect(actorId, targetActorId, reason = 'sem motivo registrado') {
+  if (!hasPermission(actorId, 'voice_mute')) {
+    sendDenied(actorId);
+    return { ok: false, reason: 'sem permissão' };
+  }
+  if (!voiceDiagnostics) return _semVoz(actorId);
+
+  const charData = commands.getActiveCharacterData(actorId);
+  const targetData = commands.getActiveCharacterData(targetActorId);
+  const result = voiceDiagnostics.disconnect(targetActorId, reason);
+
+  // Registra mesmo quando não havia voz a derrubar: a TENTATIVA é o ato de
+  // moderação, e um audit log que só grava sucesso esconde metade do que a staff
+  // fez.
+  await auditLog(
+    charData?.accountId, targetData?.accountId, 'staff:voice_disconnect',
+    `role=${getRole(actorId)} reason=${reason} ok=${result.ok}${result.ok ? '' : ` motivo=${result.reason}`}`
+  );
+
+  if (!result.ok) {
+    commands.sendNotification(actorId, 'Esse jogador nao esta na voz.');
+    return result;
+  }
+
+  commands.sendNotification(targetActorId, 'Sua conexao de voz foi encerrada pela staff. Use /voz para reconectar.');
+  commands.sendNotification(actorId, `Voz de ${nomeParaLog(targetData, targetActorId)} desconectada.`);
+  console.log(`[admin] ${actorId.toString(16)} (${getRole(actorId)}) desconectou a voz de ${targetActorId.toString(16)}: ${reason}`);
+
+  return result;
+}
+
+/**
+ * `/vozreconectar [actorId]` — reemite o token mantendo a identidade.
+ *
+ * Não é desconectar e reconectar: manter a identidade preserva as assinaturas
+ * que os outros já têm. É a ação para "o áudio dele parou mas ele ainda está lá".
+ *
+ * @param {number} actorId staff
+ * @param {number} targetActorId alvo
+ */
+async function voiceForceReconnect(actorId, targetActorId) {
+  if (!hasPermission(actorId, 'voice_mute')) {
+    sendDenied(actorId);
+    return { ok: false, reason: 'sem permissão' };
+  }
+  if (!voiceDiagnostics) return _semVoz(actorId);
+
+  const charData = commands.getActiveCharacterData(actorId);
+  const targetData = commands.getActiveCharacterData(targetActorId);
+  const result = voiceDiagnostics.forceReconnect(targetActorId);
+
+  await auditLog(
+    charData?.accountId, targetData?.accountId, 'staff:voice_force_reconnect',
+    `role=${getRole(actorId)} ok=${result.ok} transport=${result.transport ?? '-'}` +
+    `${result.ok ? '' : ` motivo=${result.reason}`}`
+  );
+
+  commands.sendNotification(actorId, result.ok
+    ? `Voz de ${nomeParaLog(targetData, targetActorId)} reconectada${result.note ? ` (${result.note})` : ''}.`
+    : `Nao foi possivel reconectar: ${result.reason}`);
+  console.log(`[admin] ${actorId.toString(16)} forcou reconexao de voz de ${targetActorId.toString(16)}: ok=${result.ok}`);
+
+  return result;
+}
+
 module.exports = {
+  bindVoiceDiagnostics,
+  voiceDiagnose,
+  voiceDisconnect,
+  voiceForceReconnect,
   registerStaffRole,
   removeStaffRole,
   hasPermission,
+  checkPermission,
   getRole,
   auditLog,
   playAnimation,
@@ -580,5 +849,7 @@ module.exports = {
   kickPlayer,
   setGold,
   retireCharacter,
-  revealIdentity
+  revealIdentity,
+  voiceMute,
+  voiceUnmute
 };

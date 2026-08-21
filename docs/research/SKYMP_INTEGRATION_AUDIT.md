@@ -4,6 +4,8 @@ Data: **2026-08-14**. Base upstream lida: `skyrim-multiplayer/skymp@d85f18d8` (m
 
 **Procedência de tudo que está aqui: leitura de código-fonte upstream.** Nada nesta auditoria vem de documentação oficial, e nada foi confirmado em jogo. Onde a documentação oficial contradiz o código, o código venceu e a divergência está registrada.
 
+> **Atualização de 20/08/2026**: achado nº 4 (`BOUND-004`, `mp.onUiEvent`) corrigido — ver nota em §5. Reconfirmado nesta data que a busca contra o upstream continua zero ocorrências, direto contra o `main` atual (não só o commit `d85f18d8` desta auditoria).
+
 ---
 
 ## 1. O que esta auditoria foi procurar, e o que achou
@@ -17,13 +19,13 @@ A resposta curta é *nenhum*. A resposta longa é pior e mais útil: procurando 
 | 1 | `Actor.GetActorValue` não existe no servidor. A rede de segurança do `death-service` derruba **todo jogador conectado** em até 2 s | `death-service.js:244` | 🔴 **Bloqueia a Fase 0** | gamemode | aberto (`BOUND-001`) |
 | 2 | `Actor.Resurrect` não existe. `/socorrer` e o respawn não ressuscitam ninguém | `death-service.js:340,434` | 🔴 Alta | gamemode | aberto (`BOUND-002`) |
 | 3 | `mp.kick(actorId)` — `kick` recebe `userId`, não FormID. Kick de staff e permadeath não desconectam ninguém | `admin-service.js`, `death-service.js` | 🔴 Alta | adapter | ✅ **corrigido nesta entrega** |
-| 4 | `mp.onUiEvent` não existe em lugar nenhum do SkyMP. **Todo o caminho CEF → servidor está ligado num callback que nunca é chamado** | `core/ui-event-gateway.js:77` | 🔴 Alta | client extension | aberto (`BOUND-004`) |
+| 4 | `mp.onUiEvent` não existe em lugar nenhum do SkyMP. **Todo o caminho CEF → servidor está ligado num callback que nunca é chamado** | `core/ui-event-gateway.js:77` | 🔴 Alta | client extension | ✅ **corrigido em 20/08/2026** (`BOUND-004`) — ver nota abaixo |
 | 5 | `Actor.GetItemCount` só resolve se `Actor.pex` estiver nos `archives` | `jobs-service.js:94` | 🟡 Condicional | gamemode + config | aberto (`BOUND-006`) |
 | 6 | `whitelist.js` expulsa depois do login em vez de recusar no `onLoginAttempt` | `whitelist.js` (5 sítios) | 🟡 Média | gamemode | aberto (`BOUND-005`) |
 
 **Zero deles precisa de patch.** Todos se resolvem no nosso lado da fronteira. Ver §7 para a escada de decisão aplicada item a item.
 
-**Só o nº 3 foi corrigido junto com esta auditoria**, porque era troca de chamada com teste. Os outros cinco exigem decidir o que colocar no lugar — e o nº 1 exige apagar código que existe como rede de segurança, o que merece revisão de quem escreveu.
+**O nº 3 foi corrigido junto com esta auditoria** (14/08), porque era troca de chamada com teste. **O nº 4 foi corrigido em 20/08/2026** (ver §5) — troca de mecanismo com teste do lado servidor, sem exercitar o snippet de cliente contra CEF real. Os outros quatro exigem decidir o que colocar no lugar — e o nº 1 exige apagar código que existe como rede de segurança, o que merece revisão de quem escreveu.
 
 E o resultado negativo que economiza mais trabalho: **os seis candidatos a patch do briefing — spawn hooks, death events, NPC sync, combate, UI custom, transição de célula — já têm resposta upstream.** A §3 mostra qual.
 
@@ -222,6 +224,10 @@ Nada de patch, nada de fork. **Toda a validação, o rate limiting e os schemas 
 
 **Hot reload não alcança quem já está conectado.** `enableGamemodeDataUpdatesBroadcast` nasce `false`: mudança de gamemode vale no servidor, mas os event sources só chegam a quem logar depois. Isso entra no procedimento de atualização — ver [`SKYMP_COMPATIBILITY_MATRIX.md`](../technical/SKYMP_COMPATIBILITY_MATRIX.md) §4.
 
+### ✅ Corrigido em 20/08/2026
+
+`core/ui-event-gateway.js` passou a registrar `mp.makeEventSource('_onUiEvent', ...)` com o snippet exato desta seção (`ctx.sp.on('browserMessage', ...)` → `ctx.sendEvent(...)`), e `ui/index.html` (`sendUiEvent`) passou a chamar `window.skyrimPlatform.sendMessage({type, data})` em vez de `window.mp.trigger`/`window.mp.send` — que também nunca foram confirmados como API real da CEF (busca por `window.mp` no upstream só aparece em `skymp5-front`, o painel administrativo separado, não no cliente de jogo). Os outros usos de `mp.trigger`/`mp.events.add` em `ui/index.html` (voip, trade, `interaction:open`/`close`, todos servidor→cliente ou internos à UI) **não foram tocados nesta correção** — continuam com o mesmo nível de confiança de antes, nem confirmados nem corrigidos. O snippet de cliente novo não foi exercitado contra CEF real (mesma ressalva de `core/hit-events.js`); só o lado servidor (registro do event source + despacho) tem teste automatizado. Ver `docs/research/MINING_RUNTIME_VALIDATION_REPORT.md` para o contexto que motivou a correção.
+
 ---
 
 ## 6. `mp.kick` recebe `userId`
@@ -312,7 +318,7 @@ Isso não contraria a regra de que nada passa na frente da Fase 0. É o contrár
 | `BOUND-001` | Remover o laço de polling do `death-service` | **sim** | aberto |
 | `BOUND-002` | Substituir `Actor.Resurrect` por `isDead` + `SetActorValue` | **sim** | aberto |
 | `BOUND-003` | `kick` pelo adaptador nos três sítios | **sim** | ✅ 14/08 |
-| `BOUND-004` | `_onUiEvent` por `makeEventSource` | **sim** | aberto |
+| `BOUND-004` | `_onUiEvent` por `makeEventSource` | **sim** | ✅ 20/08 |
 | `BOUND-005` | Whitelist por `onLoginAttempt` | não | aberto |
 | `BOUND-006` | Conferir `Actor.pex` nos `archives` | não | aberto |
 | `BOUND-007` | Proximidade de voz por `getNeighborsByPosition` | não | aberto |

@@ -7,6 +7,17 @@ conexão e voz.
 e validado. Não trate código existente no disco como funcional em produção sem
 confirmar se o módulo está registrado no `core/module-registry.js`.
 
+> ⚠️ **Registro histórico, superado (14/08/2026).** Descreve o estado de
+> 11/08/2026 e é preservado porque explica *por que* as fronteiras de confiança,
+> a economia transacional e a idempotência das barracas foram feitas na ordem em
+> que foram. **Não use como estado atual.** O que mudou desde então, e que este
+> texto contradiz: a voz deixou de ser "relay PCM/WebSocket próprio" e virou o
+> Voice Core com política de personagem e gateway LiveKit (cinco etapas — ver
+> [`SKYVOICE_PRODUCTION_READINESS.md`](../technical/SKYVOICE_PRODUCTION_READINESS.md));
+> o `trade-service` deixou de ser PARKED e está registrado; e o `profileId`
+> online passou a resolver `accounts.id` no servidor. Para o estado real de cada
+> componente, leia [`QA_REPORT_2026-08.md`](../technical/QA_REPORT_2026-08.md).
+
 ## Resumo executivo
 
 O trabalho priorizou segurança e consistência antes de ativar novos sistemas:

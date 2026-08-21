@@ -1,0 +1,61 @@
+# SkyVoice — terminação TLS do LiveKit
+#
+# ⚠️ NUNCA FOI EXECUTADO.
+#
+# O Caddy tira certificado do Let's Encrypt sozinho e o renova sem reiniciar o
+# que está atrás dele. É a razão de ele estar aqui em vez do TLS embutido do
+# LiveKit: renovar sem restart significa não derrubar a voz de quem está na sala
+# a cada 90 dias.
+#
+# Pré-requisitos, e os dois falham em silêncio se estiverem errados:
+#   1. `voz.exemplo.tld` resolvendo para o IP público DESTA máquina (A/AAAA);
+#   2. portas 80 e 443 alcançáveis de fora — o desafio ACME usa a 80.
+
+voz.exemplo.tld {
+	# WebSocket e a API de sala (Twirp) na mesma origem.
+	#
+	# É a origem que o gamemode usa nas duas pontas: o cliente conecta em
+	# `wss://voz.exemplo.tld` e o `livekit-gateway` chama
+	# `https://voz.exemplo.tld/twirp/...`. A tradução `wss:` → `https:` é feita
+	# em `httpBaseFrom()` justamente para não existir uma segunda variável de
+	# ambiente que precise concordar com a primeira à mão.
+	reverse_proxy 127.0.0.1:7880
+
+	# Sem compressão.
+	#
+	# O tráfego aqui é sinalização WebSocket e chamadas Twirp curtas; comprimir
+	# um WebSocket de sinalização acrescenta latência ao handshake e ao
+	# `UpdateSubscriptions`, que é justamente o caminho que precisa ser barato.
+	# A mídia nem passa por aqui — ela é UDP direto na 50000–60000.
+
+	header {
+		# HSTS: uma vez que o navegador da CEF veja este domínio em HTTPS, ele
+		# recusa voltar para HTTP. Fecha o rebaixamento que entregaria o access
+		# token em texto puro.
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		-Server
+	}
+
+	log {
+		output file /data/access.log {
+			roll_size 20mb
+			roll_keep 5
+		}
+		# O log de acesso registra URL e status. As URLs do LiveKit não carregam
+		# identidade de participante no path — ela vai no corpo e no JWT. Se
+		# algum dia carregarem, este log passa a ser um registro de quem entrou
+		# na voz e quando, e precisa ser reavaliado.
+	}
+}
+
+# TURN sobre TLS.
+#
+# Porta 5349, e ela NÃO passa por reverse proxy: TURN não é HTTP. O que o Caddy
+# faz aqui é só emitir e renovar o certificado que o LiveKit lê.
+turn.exemplo.tld {
+	tls {
+		# `on_demand` não. O domínio é conhecido e fixo; on-demand abriria a
+		# emissão para qualquer nome que apontasse para cá.
+	}
+	respond "TURN" 200
+}

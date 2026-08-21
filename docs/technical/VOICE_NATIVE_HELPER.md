@@ -112,9 +112,45 @@ base64 (§4) infla 33% → **~1 Mbit/s de subida**. Na descida, o relay multipli
 pelo número de ouvintes em alcance. Isso é caro e é sabido — é aceitável para
 uma prova de conceito em rede local e **não é aceitável em produção**.
 
-**Fase 2: Opus** (`libopus`, disponível no vcpkg). A 24 kbit/s a voz fica
-transparente e o consumo cai ~30x, o que também torna irrelevante o desperdício
-do base64.
+**Fase 2: Opus — implementada em 20/08/2026.** `libopus` (vcpkg, `opus` 1.6.1),
+`OPUS_APPLICATION_VOIP`, 24 kbit/s, mesmo quadro de 960 amostras / 20ms de
+sempre — nenhum reenquadramento, porque 960 já era um dos tamanhos nativos do
+Opus a 48kHz.
+
+O formato do fio ganhou um campo: `{"type":"audio_frame", "codec":"opus", ...}`.
+`codec` ausente continua sendo PCM cru — um `voice-helper` antigo já em campo
+(como o build que um dev testou em produção em 20/08, contra `104.234.65.67`)
+não precisa saber que isto existe. O servidor não decide nem olha o codec, só
+repassa o que o locutor declarou (`relayAudioFrame` em `voip-service.js`).
+
+**O que está provado:**
+- **Fidelidade do codec, em C++ real** — `voice-helper/src/opus_roundtrip.test.cpp`
+  encoda e decoda com o mesmo `libopus` de produção: energia em 440Hz sobrevive
+  96% ao encode/decode com perda, domina o controle em 1kHz por >100x, RMS a
+  2% do teórico.
+- **A redução de banda, ponta a ponta, com microfone real** — 250 quadros que
+  eram 480.000 bytes em PCM (medido na §8.5) caíram para **9.074 bytes em
+  Opus** contra o `e2e-harness.js` de verdade: ~53x, melhor que a estimativa
+  de ~30x acima, porque parte de uma sala quieta é quase silêncio e o Opus
+  aproveita isso.
+- **A fiação do lado do ouvinte (`playOpusRelayFrame`/`ensureOpusDecoder` em
+  `skymp/ui/index.html`)** — 7 testes em `voice-audio.test.js` com um
+  `AudioDecoder` falso: reaproveita o decoder entre quadros, não cruza
+  volume/efeito de quadros diferentes quando o `output` assíncrono chega fora
+  de ordem do `proximity_update`, fecha o decoder ao remover o locutor, e
+  degrada pra "descarta, não trava" se a CEF não tiver `AudioDecoder` ou
+  recusar `configure({codec:'opus'})`.
+- **Que `AudioDecoder` decodifica Opus cru sem `description`/OpusHead** —
+  verificado à mão, `{codec:'opus', sampleRate, numberOfChannels}` bastou,
+  round-trip de encode+decode via WebCodecs com RMS batendo o esperado.
+
+**O que NÃO está provado:** o parágrafo acima rodou num Chromium de mesa
+(Electron 148), **não na CEF 108 real do client**. Se a CEF 108 não tiver
+`AudioDecoder`, ou recusar `'opus'` especificamente, o código já degrada
+("descarta, não trava" — mesmo teste que cobre CEF sem WebCodecs nenhum), mas
+ninguém exercitou isso na CEF de verdade. E continua valendo a §8.2/§8.6:
+ninguém ouviu a voz decodificada com Opus com o ouvido, muito menos comparou
+com PCM pra dizer se soa igual, pior ou melhor.
 
 ## 4. Decisão: mesma porta, mesmo ticket, JSON com base64
 
@@ -299,6 +335,10 @@ quadros foi a sonda, não um microfone.
 
 4. **Qualquer coisa fora de `127.0.0.1`.** Latência, perda e jitter de rede real
    não foram exercitados; o jitter buffer de 60ms nunca viu um pacote atrasado.
+   **Parcialmente resolvido em 20/08/2026 — ver §8.6**, só para o lado do
+   locutor: captura e envio sustentaram uma sessão real de ~85s pela internet,
+   sem descarte. O lado do ouvinte, com jitter de rede de verdade, continua sem
+   teste.
 
 ## 8. Bloqueio: não há toolchain C++ nesta máquina
 
@@ -449,6 +489,55 @@ que seriam código nosso para manter sem ganho nenhum sobre o que a biblioteca j
 faz. Escolha do `ixwebsocket`: API pequena e síncrona o bastante para caber num
 executável de terminal, sem arrastar Boost.
 
+### 8.5 Reverificação em 20/08/2026 — sem regressão
+
+Rodada de verificação independente, do zero (`build_verify/`, descartado depois),
+não reaproveitando nenhum binário antigo.
+
+| Verificado | Resultado |
+|---|---|
+| `vcpkg install` das três ports contra o `vcpkg.json` atual | resolve, ~700ms |
+| Link com `bcrypt` (fix da §8.3) | continua no `CMakeLists.txt`, build limpo |
+| `voice-helper.exe` roda e fala `--help`/uso | sim, e expõe um modo não documentado aqui: `--control-port` + `--pair` (pareamento com o launcher, ver `SKYVOICE_E2E_ETAPA_5.md`) |
+| `e2e-harness.js` (código de produção do `voip-service`, não mock) + `voice-helper.exe` capturando microfone real, dois atores a 300 de 1200 de alcance | `proximity_update` com `volume: 0.75` (matematicamente exato: `1 - 300/1200`), 500 quadros relayados ao `frame-probe.js --listen`, zero descarte |
+| `npm test` do gamemode | 1623/1623, incluindo `voip-service.test.js` |
+
+Nada regrediu desde a §8.3/§8.4. **O que continua exatamente igual:** ninguém
+ouviu o áudio com o ouvido — a §8.2 segue de pé, palavra por palavra, e vale
+tanto para este helper quanto para o spike de LiveKit em
+`spikes/skyvoice-livekit-cpp/` (commit `79dd5bd`), que fechou pelo mesmo
+motivo: "NINGUÉM OUVIU" como blocker #1. É julgamento humano, não medição, e
+continua sendo o único passo do roteiro que não pode ser feito por um agente.
+
+### 8.6 Primeiro teste solo por um humano, em rede real — 20/08/2026
+
+Um dev (`adm.thiago`) rodou o `voice-helper.exe` do build oficial contra um
+servidor real na internet (`104.234.65.67:7778`, não `127.0.0.1`), modo direto,
+com `actorId` e ticket reais:
+
+```
+.\voice-helper.exe --actor-id 0xFF000002 --ticket ec5e3064a867dcc301c6712e84c97af3 --host 104.234.65.67 --port 7778
+[helper] Conectado em ws://104.234.65.67:7778; autenticando como sender.
+[helper] Autenticado. Capturando; Ctrl+C pra sair.
+...
+[helper] Encerrando. 4264 quadros enviados.
+[helper] Conexao fechada pelo servidor.
+```
+
+**O que isto prova:** ~85s de captura e envio (4264 quadros / 50/s) por uma
+rede real, sem um único "descartado na fila" nos logs periódicos, e
+encerramento limpo por Ctrl+C seguido do servidor fechando a conexão — não uma
+queda. É o primeiro dado da §7/§9 item 10 (rede real) e do item 4 de "não foi
+verificado" que não é `127.0.0.1`.
+
+**O que isto NÃO prova:** era um teste solo, sem ouvinte pareado — nenhum
+`listener` estava conectado para receber esses quadros. Não valida o relay sob
+rede real, não valida o jitter buffer sob latência real, e continua sem
+resolver o único bloqueio que falta desde a §7: **ninguém ouviu**. O próximo
+passo natural é repetir isto com um segundo terminal/pessoa autenticado como
+`listener` no mesmo `actorId` de audiência, pra fechar esse teste com alguém
+de verdade escutando.
+
 ## 9. Próxima rodada — listado, não implementado
 
 Nada abaixo foi feito neste PR.
@@ -463,9 +552,24 @@ Nada abaixo foi feito neste PR.
    a §10 (o ticket agora é por papel, e um `/voz` emite os dois); o handoff
    automático continua aberto e é Fase 3. O andaime temporário que destrava o
    teste manual está na §11.
-3. **Empacotamento e assinatura do executável**, e integração com o launcher —
-   mesma exigência de carimbo de tempo já registrada em
-   [`LAUNCHER_DISTRIBUTION.md` §6](LAUNCHER_DISTRIBUTION.md).
+3. **Empacotamento — resolvido em 20/08/2026.** O gap real não era
+   assinatura, era que **não existia pipeline nenhum**: o `voice-helper.exe`
+   era compilado à mão desde a Fase 1, e o `downloadUrl` de exemplo em
+   `voice-dist.test.mjs` nunca apontou pra uma release de verdade. Agora
+   existe `.github/workflows/release-voice-helper.yml` — builda, roda os
+   testes de C++ (`reframe_10ms`, `opus_roundtrip`) como gate, empacota só o
+   `.exe` + as DLLs de runtime, e assina se houver certificado.
+   **Assinatura continua pendente** — mesma exigência de carimbo de tempo já
+   registrada em [`LAUNCHER_DISTRIBUTION.md` §6](LAUNCHER_DISTRIBUTION.md),
+   e **o mesmo certificado cobriria os dois `.exe`** sem custo extra (Azure
+   Trusted Signing cobra por assinatura/mês, não por binário). O achado novo:
+   `voice-helper.exe` tem perfil de risco pra SmartScreen/antivírus
+   provavelmente **maior** que o instalador do launcher — é um binário sem
+   reputação nenhuma, que abre socket de rede e acessa microfone, lançado
+   silenciosamente por outro processo. Comprar o certificado continua sendo
+   decisão de negócio (CNPJ, orçamento), não algo que pesquisa resolve.
+   Publicar em GitHub Releases também continua sendo passo humano, igual ao
+   `client-update.json` do launcher.
 
 **Qualidade**
 

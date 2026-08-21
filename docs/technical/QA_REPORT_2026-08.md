@@ -14,21 +14,21 @@ Varredura completa do monorepo: gamemode, painel web, bot do Discord, launcher, 
 
 | Componente | Testes | Instalável | Estado real |
 |---|---|---|---|
-| `skymp/gamemode` | 444/444 ✅ + 13/13 checks de sistema | ✅ | **Maduro, e agora com um boot real atrás.** Transações atômicas, máquina de estado, registry de módulos, cobertura de teste real. A segunda rodada (2.16–2.25) achou dez defeitos que a suíte não pegava — nove deles de configuração ou de ciclo de vida. |
+| `skymp/gamemode` | 1270/1270 ✅ + 13/13 checks de sistema | ✅ | **Maduro, e agora com um boot real atrás.** Transações atômicas, máquina de estado, registry de módulos, cobertura de teste real. A segunda rodada (2.16–2.25) achou dez defeitos que a suíte não pegava — nove deles de configuração ou de ciclo de vida. O salto de 444 para 1270 é sobretudo voz (SkyVoice, etapas 1–5) e os três frameworks de 13/08. |
 | `apps/bot-discord` | 40/40 ✅ | ✅ | **Funcional.** Sync de cargo, canais de voz temporários e, desde 07/08/2026, o log de moderação que a `ARCHITECTURE.md` 1.3 registrava como intenção nunca implementada. |
 | `apps/web` | 40/40 ✅ | ✅ | **Funcional.** Ganhou smoke tests nesta rodada. |
-| `apps/launcher` | 24/24 ✅ (paridade) | ✅ | **Estava quebrado ponta a ponta** (ver 2.1) e sem teste nenhum. A lógica de paridade de modpack foi extraída pra `electron/parity.mjs` e testada — achou o buraco do plugin extra (2.15). O resto do `main.ts` depende de Electron. |
-| `apps/game-api` | 30/30 ✅ | ✅ | **Novo.** Serve a porta 7758 que o launcher sempre chamou e que não existia. O gerador de manifesto ganhou teste e a flag `--only-load-order` (2.26). |
+| `apps/launcher` | 74/74 ✅ | ✅ | **Estava quebrado ponta a ponta** (ver 2.1) e sem teste nenhum. A lógica de paridade de modpack foi extraída pra `electron/parity.mjs` e testada — achou o buraco do plugin extra (2.15). A distribuição de voz (`electron/voice-dist.mjs`) veio depois, com manifesto, integridade e rollback. O resto do `main.ts` depende de Electron e **nunca foi executado**. |
+| `apps/game-api` | 48/48 ✅ | ✅ | **Novo.** Serve a porta 7758 que o launcher sempre chamou e que não existia. O gerador de manifesto ganhou teste e a flag `--only-load-order` (2.26). |
 | Tipagem `mp` | `npm run typecheck` | — | `skymp/gamemode/types/mp.d.ts` tipa a API do SkyMP (não há typings públicos upstream). Informativo, não trava build nem teste. Achou 2.13 e 2.14 na primeira execução. |
 | Schema / migrations | `npm run check:schema` | — | Consistente **depois da v9**. O checador achou `characters.gold` declarada no `schema.sql` e em migration nenhuma (2.21) — banco novo funcionava, banco migrado não. |
 
 ### O que efetivamente roda hoje
 
-**Dez** módulos registrados no `core/module-registry.js`, todos atrás de flag `ENABLE_*` e **todos desligados por padrão**: `npc-cleaner` (core), `death`, `governance`, `market-stalls`, `player-panel`, `soul`, `voip`, `nametag`, `fauna-census`, `corpse-probe` (lab). Os dois últimos não são mecânica: são instrumentos de observação da Fase 0 para a questão de mobs hostis — ver [`FAUNA_CENSUS_PROTOCOL.md`](FAUNA_CENSUS_PROTOCOL.md).
+**Doze** módulos registrados no `core/module-registry.js`, todos atrás de flag `ENABLE_*` e **todos desligados por padrão**: `interaction`, `npc-cleaner` (core), `death`, `governance`, `market-stalls`, `player-panel`, `soul`, `voip`, `nametag`, `trade`, `fauna-census`, `corpse-probe` (lab). Os dois últimos não são mecânica: são instrumentos de observação da Fase 0 para a questão de mobs hostis — ver [`FAUNA_CENSUS_PROTOCOL.md`](FAUNA_CENSUS_PROTOCOL.md).
 
 > ⚠️ **Até 06/08/2026 as flags não ligavam nada** — o gamemode nunca carregou o próprio `.env` (2.16). O primeiro boot real do servidor aconteceu em 06/08/2026, com quatro módulos ativos e 33 comandos registrados.
 
-Sete serviços existem no disco e **nunca são registrados** — `economy-regional`, `jobs`, `crafting`, `housing`, `trade`, `disguise`, `horse` (PARKED). Outros quatro foram apagados em 06/08/2026 (`economy-service`, `justice`, `faction`, `survival`) por duplicarem sistema ativo ou serem inseguros — ver `PARKED_SERVICES_DECISION.md`. Os que ficaram e mexiam em ouro foram migrados pro `core/transaction-service`.
+**Cinco** serviços existem no disco e **nunca são registrados** — `economy-regional`, `jobs`, `crafting`, `housing`, `horse` (PARKED). O `trade-service` saiu dessa lista: está registrado desde 13/08/2026, sobre o [Inventory Framework](../framework/INVENTORY_FRAMEWORK.md). Outros quatro foram apagados em 06/08/2026 (`economy-service`, `justice`, `faction`, `survival`) e o `disguise-service` numa segunda rodada, por duplicarem sistema ativo ou serem inseguros — ver `PARKED_SERVICES_DECISION.md`. Os que ficaram e mexiam em ouro foram migrados pro `core/transaction-service`.
 
 ---
 

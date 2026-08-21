@@ -1,0 +1,195 @@
+# Build, teste e empacotamento do voice-helper.exe — assinado quando há certificado.
+#
+# Existe porque não havia NENHUM pipeline pra isto: o `voice-helper.exe` é
+# compilado à mão desde a Fase 1, e o `downloadUrl` de exemplo em
+# `apps/launcher/electron/voice-dist.test.mjs` nunca apontou pra uma release
+# de verdade. Espelha `release-launcher.yml` no que dá pra espelhar — mesmo
+# padrão de "avisa se não há certificado, mas não trava o build" — mas é um
+# artefato diferente: não é `electron-builder` quem assina aqui, é `signtool`
+# direto, porque o `voice-helper.exe` não passa pelo `electron-builder`.
+#
+# ─── O que este workflow prova, e o que não prova ───────────────────────────
+#
+# **Prova** que o binário compila em /W4, que os testes de codec e
+# reenquadramento (`reframe_10ms.test.cpp`, `opus_roundtrip.test.cpp`) passam
+# antes de qualquer coisa ser publicada, e — quando os segredos existem — que
+# a assinatura foi aplicada e é válida (`Get-AuthenticodeSignature`).
+#
+# **Não prova** que o SmartScreen deixa passar (mesma ressalva do
+# `release-launcher.yml` — só se confere baixando numa máquina limpa), nem
+# publica em GitHub Releases sozinho: isso é passo humano, igual ao launcher.
+# O artefato de CI aqui é para inspeção e para pegar o SHA-256 a mão, não é o
+# canal de distribuição.
+name: Voice Helper — build, teste e assinatura
+
+on:
+  push:
+    tags:
+      - 'voice-helper-v*'
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: voice-helper.exe (Windows)
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+        working-directory: voice-helper
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Clonado e bootstrapado aqui, não reaproveitado do runner: o vcpkg que
+      # já vem em `windows-latest` é detalhe de imagem, não documentado como
+      # contrato — e este projeto já foi mordido por confiar em detalhe de
+      # ambiente não verificado (ver VOICE_NATIVE_HELPER.md §8).
+      - name: Clonar e bootstrapar o vcpkg
+        run: |
+          git clone https://github.com/microsoft/vcpkg C:/vcpkg-ci
+          C:/vcpkg-ci/bootstrap-vcpkg.bat
+
+      # `vcpkg.json` está em modo manifesto — miniaudio, ixwebsocket,
+      # nlohmann-json e opus resolvem aqui, sem `vcpkg install` separado.
+      - name: Configurar (CMake + vcpkg)
+        run: |
+          cmake -B build -S . `
+            -DCMAKE_TOOLCHAIN_FILE=C:/vcpkg-ci/scripts/buildsystems/vcpkg.cmake `
+            -DVCPKG_TARGET_TRIPLET=x64-windows `
+            -DCMAKE_BUILD_TYPE=Release
+
+      - name: Compilar
+        run: cmake --build build --config Release
+
+      # Gate real antes de empacotar: um binário que compila mas falha o
+      # round-trip de Opus ou o reenquadramento não deveria virar release.
+      # Roda os dois diretamente (não via `ctest`) pra ver a saída de cada um
+      # no log, do mesmo jeito que a bancada local já mostra.
+      - name: Testar (reframe_10ms + opus_roundtrip)
+        run: |
+          Write-Host '--- reframe-10ms-test ---'
+          & .\build\Release\reframe-10ms-test.exe
+          if ($LASTEXITCODE -ne 0) { Write-Error 'reframe-10ms-test falhou'; exit 1 }
+
+          Write-Host '--- opus-roundtrip-test ---'
+          & .\build\Release\opus-roundtrip-test.exe
+          if ($LASTEXITCODE -ne 0) { Write-Error 'opus-roundtrip-test falhou'; exit 1 }
+
+      # Mesmo aviso do release-launcher.yml, adaptado: aqui quem assina é
+      # `signtool`, não o electron-builder, porque este `.exe` não passa por
+      # ele. Reaproveita os MESMOS segredos do launcher — é o mesmo
+      # certificado, e comprar um segundo pra isto seria dobrar o custo por
+      # nada (ver LAUNCHER_DISTRIBUTION.md §6.3).
+      - name: Há certificado neste ambiente?
+        id: cert
+        shell: bash
+        working-directory: voice-helper
+        env:
+          CSC_LINK: ${{ secrets.WINDOWS_CSC_LINK }}
+        run: |
+          if [ -n "$CSC_LINK" ]; then
+            echo "assinado=true" >> "$GITHUB_OUTPUT"
+            echo "Certificado presente: voice-helper.exe sai ASSINADO."
+          else
+            echo "assinado=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::WINDOWS_CSC_LINK ausente. voice-helper.exe sai NAO ASSINADO — risco de SmartScreen/antivirus e' provavelmente MAIOR aqui que no launcher, porque este processo abre rede e acessa microfone sem janela nenhuma."
+          fi
+
+      # `CSC_LINK` pode ser caminho de arquivo OU o .pfx inteiro em base64
+      # (mesma convenção que o electron-builder usa pro launcher). Decodifica
+      # pra um arquivo temporário só quando for base64 — nunca escreve o
+      # segredo em log.
+      - name: Assinar voice-helper.exe
+        if: steps.cert.outputs.assinado == 'true'
+        env:
+          CSC_LINK: ${{ secrets.WINDOWS_CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.WINDOWS_CSC_KEY_PASSWORD }}
+        run: |
+          $pfxPath = "$env:RUNNER_TEMP\voice-helper-signing.pfx"
+          if (Test-Path $env:CSC_LINK) {
+            Copy-Item $env:CSC_LINK $pfxPath
+          } else {
+            [IO.File]::WriteAllBytes($pfxPath, [Convert]::FromBase64String($env:CSC_LINK))
+          }
+
+          $signtool = Get-ChildItem "C:/Program Files (x86)/Windows Kits/10/bin" -Recurse -Filter signtool.exe |
+            Where-Object { $_.FullName -like '*x64*' } | Select-Object -First 1
+          if (-not $signtool) { Write-Error 'signtool.exe nao encontrado no runner.'; exit 1 }
+
+          & $signtool.FullName sign /f $pfxPath /p $env:CSC_KEY_PASSWORD /fd sha256 `
+            /tr http://timestamp.digicert.com /td sha256 build/Release/voice-helper.exe
+          if ($LASTEXITCODE -ne 0) { Write-Error 'signtool falhou.'; exit 1 }
+
+          Remove-Item $pfxPath -Force
+
+      # Mesma verificação de verdade do release-launcher.yml:
+      # `Get-AuthenticodeSignature` só devolve `Valid` quando a cadeia fecha
+      # e o carimbo de tempo está lá. Falha o job se havia certificado e a
+      # assinatura não colou — silencioso aqui seria pior que build quebrado.
+      - name: Verificar a assinatura
+        run: |
+          $sig = Get-AuthenticodeSignature build/Release/voice-helper.exe
+          Write-Host "Status: $($sig.Status)"
+          Write-Host "Signatario: $($sig.SignerCertificate.Subject)"
+          Write-Host "Carimbo de tempo: $($sig.TimeStamperCertificate.Subject)"
+
+          if ('${{ steps.cert.outputs.assinado }}' -eq 'true') {
+            if ($sig.Status -ne 'Valid') {
+              Write-Error "Havia certificado e a assinatura nao ficou valida (status: $($sig.Status))."
+              exit 1
+            }
+            if (-not $sig.TimeStamperCertificate) {
+              Write-Error 'Assinado sem carimbo de tempo.'
+              exit 1
+            }
+            Write-Host 'OK: assinado e carimbado.'
+          } else {
+            Write-Host '::warning::voice-helper.exe NAO assinado (sem certificado no ambiente). Nao distribua.'
+          }
+
+      # Empacota TUDO que está em build/Release/ — não só o .exe. O CMake
+      # copia as DLLs de runtime que o vcpkg resolveu (zlib e afins) pra
+      # dentro dessa pasta automaticamente; zipar só o .exe distribuiria um
+      # binário que abre e morre por DLL ausente na máquina do jogador, que
+      # não tem o vcpkg pra suprir a falta.
+      - name: Empacotar
+        run: |
+          # Só `voice-helper.exe`, não `*.exe` — a pasta `Release/` também tem
+          # `reframe-10ms-test.exe` e `opus-roundtrip-test.exe`, que não têm
+          # nada que fazer na máquina de um jogador.
+          $dist = 'voice-helper-dist'
+          New-Item -ItemType Directory -Path $dist -Force | Out-Null
+          Copy-Item build/Release/voice-helper.exe $dist
+          Copy-Item build/Release/*.dll $dist -ErrorAction SilentlyContinue
+          Compress-Archive -Path "$dist/*" -DestinationPath voice-helper.zip -Force
+
+          $hash = (Get-FileHash voice-helper.zip -Algorithm SHA256).Hash.ToLower()
+          $size = (Get-Item voice-helper.zip).Length
+          Write-Host "SHA-256: $hash"
+          Write-Host "Tamanho: $size bytes"
+
+          # Não publica em voice-dist.json sozinho — isso é o mesmo passo
+          # humano que o launcher já tem pro client-update.json (ver
+          # LAUNCHER_DISTRIBUTION.md secao 2). O que este workflow faz é
+          # deixar o hash certo, fácil de copiar, no lugar onde alguém olha.
+          $manifestoExemplo = @{
+            voiceVersion = "$env:GITHUB_REF_NAME" -replace '^voice-helper-v', ''
+            downloadUrl = "https://github.com/$env:GITHUB_REPOSITORY/releases/download/$env:GITHUB_REF_NAME/voice-helper.zip"
+            sha256 = $hash
+            sizeBytes = $size
+            mandatory = $false
+          } | ConvertTo-Json
+
+          Write-Host "--- Cole isto (ajustado) em voice-dist.json ao publicar a release ---"
+          Write-Host $manifestoExemplo
+
+      - name: Publicar como artefato de CI
+        uses: actions/upload-artifact@v4
+        with:
+          name: voice-helper-zip
+          path: voice-helper/voice-helper.zip
+          if-no-files-found: error
+          # Curto de propósito, mesma razão do release-launcher.yml: artefato
+          # de CI não é canal de distribuição. O canal é o GitHub Releases,
+          # publicado à mão a partir daqui.
+          retention-days: 14

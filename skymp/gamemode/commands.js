@@ -390,63 +390,22 @@ function registerCoreCommands() {
     });
   }, { module: 'identity', phase: 'core', description: 'Define como você reconhece outra pessoa', usage: '/apelido <actorId> <nome>' });
 
-  commandRegistry.register('/anim', (actorId, args) => {
-    if (args) {
-      const parts = args.split(' ');
-      const adminService = require('./admin-service');
-      adminService.playAnimation(actorId, parseInt(parts[0], 16), parts[1] || 'IdleStop');
-    }
-  }, { module: 'admin', phase: 'core', description: '[Staff] Reproduz animação em ator', usage: '/anim <actorId> <animName>' });
-
-  commandRegistry.register('/additem', (actorId, args) => {
-    if (args) {
-      const parts = args.split(' ');
-      require('./admin-service').giveItemAdmin(actorId, parseInt(parts[0], 16), parseInt(parts[1], 16), parseInt(parts[2]) || 1);
-    }
-  }, { module: 'admin', phase: 'core', description: '[Staff] Entrega item a jogador', usage: '/additem <actorId> <baseId> <count>' });
-
-  commandRegistry.register('/tp', (actorId, args) => {
-    if (args) require('./admin-service').teleportTo(actorId, parseInt(args, 16));
-  }, { module: 'admin', phase: 'core', description: '[Staff] Teleporta para jogador', usage: '/tp <actorId>' });
-
-  commandRegistry.register('/kick', (actorId, args) => {
-    if (args) {
-      const parts = args.split(' ');
-      const reason = parts.slice(1).join(' ') || 'Sem motivo';
-      require('./admin-service').kickPlayer(actorId, parseInt(parts[0], 16), reason);
-    }
-  }, { module: 'admin', phase: 'core', description: '[Staff] Expulsa jogador', usage: '/kick <actorId> <motivo>' });
-
-  commandRegistry.register('/permakill', (actorId, args) => {
-    if (args) {
-      const parts = args.split(' ');
-      const reason = parts.slice(1).join(' ');
-      require('./admin-service').retireCharacter(actorId, parseInt(parts[0], 16), reason);
-    }
-  }, { module: 'admin', phase: 'core', description: '[Staff] Encerra um personagem permanentemente (soft-delete)', usage: '/permakill <actorId> <motivo>' });
-
-  commandRegistry.register('/setgold', (actorId, args) => {
-    if (args) {
-      const parts = args.split(' ');
-      require('./admin-service').setGold(actorId, parseInt(parts[0], 16), parseInt(parts[1]));
-    }
-  }, { module: 'admin', phase: 'core', description: '[Staff] Define ouro de jogador', usage: '/setgold <actorId> <valor>' });
-
-  // Alias técnico em inglês pelo mesmo padrão de /apresentar → /introduce.
-  // `parseActorId` (e não `parseInt(args, 16)` como os outros de staff) porque
-  // este é o comando que a staff digita copiando um id de um log ou do painel,
-  // onde ele aparece com o prefixo `0x`.
-  commandRegistry.register(['/revelaridentidade', '/revealidentity'], (actorId, args) => {
-    const targetActorId = parseActorId(args);
-    if (!Number.isFinite(targetActorId)) {
-      sendNotification(actorId, 'Uso correto: /revelaridentidade <actorId>');
-      return;
-    }
-    require('./admin-service').revealIdentity(actorId, targetActorId).catch(err => {
-      console.error('[identity] Falha ao revelar identidade:', err.message);
-      sendNotification(actorId, '[Staff] Nao foi possivel revelar a identidade.');
-    });
-  }, { module: 'admin', phase: 'core', description: '[Staff] Revela o nome real de um personagem (auditado)', usage: '/revelaridentidade <actorId>' });
+  // ── Ações de staff ─────────────────────────────────────────────────────────
+  //
+  // Eram doze `commandRegistry.register` aqui, cada um com o próprio
+  // `parseInt(parts[0], 16)`, o próprio tratamento de argumento faltando e a
+  // própria decisão sobre motivo obrigatório — e cinco das ações de voz não
+  // tinham registro nenhum, apesar de existirem, terem permissão, auditoria e
+  // teste. Digitar `/vozdiag` respondia "Comando desconhecido".
+  //
+  // Agora a declaração é uma só, em `admin-actions.js`: nome do comando, ação,
+  // permissão, parâmetros e motivo no mesmo lugar. O que roda entre o chat e o
+  // `admin-service` é o pipeline (`core/admin-action.js`), que resolve sessão e
+  // alvo no servidor antes de qualquer coisa acontecer.
+  //
+  // A seta aponta para cá: `admin-actions.js` não importa este arquivo no topo
+  // nem conhece o `commandRegistry` — ele recebe os dois.
+  require('./admin-actions').registerCommands(commandRegistry, sendNotification);
 
   // /status — diagnóstico de estado do personagem (staff)
   commandRegistry.register('/status', (actorId, args) => {

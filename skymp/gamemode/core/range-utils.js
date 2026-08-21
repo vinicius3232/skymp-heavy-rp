@@ -7,9 +7,36 @@
  * novo sistema que precisa de "alvo tem que estar perto".
  */
 
+/**
+ * `mp.get(formId, 'locationalData')` **lança** quando `formId` não existe em
+ * `WorldState` — confirmado lendo o addon upstream (`ScampServer::Get` chama
+ * `GetFormAt<MpObjectReference>`, que lança `std::runtime_error` para form
+ * inexistente e o addon rejoga como `Napi::Error`; ver
+ * `docs/research/MINING_RUNTIME_VALIDATION_REPORT.md` §"SkyMP API
+ * Investigation"). Isto nunca apareceu enquanto só atores (sempre existentes
+ * em `WorldState` por definição) passavam por aqui — `object` como tipo de
+ * alvo (`core/interaction-targets.js`) é o primeiro caminho que entrega um
+ * FormId que o cliente escolheu e o servidor não validou antes de perguntar
+ * a posição, o que inclui FormId forjado ou de um objeto nunca carregado.
+ *
+ * Sem este `try/catch`, essa lançada escapava de `assertRange` (que não tem
+ * `try/catch` próprio) para dentro do `buildContext` assíncrono de
+ * `core/interaction-service.js`, virava uma promise rejeitada, e só era pega
+ * pelo `catch` genérico de `core/ui-event-gateway.js` — nunca pelo estágio
+ * `DISTANCE` do pipeline, que é onde este tipo de recusa deveria aparecer
+ * (mensagem específica, auditoria correta). `null` aqui é o mesmo valor que
+ * `getLoc` já devolve para "não consegui saber onde isto está" — a chamada
+ * volta a cair no `if (!la || !lb) return null;` de `distanceBetween`, que
+ * `assertRange` já traduzia em `{ok:false, reason:'Nao foi possivel validar
+ * proximidade.'}`.
+ */
 function getLoc(actorId) {
   if (typeof mp === 'undefined') return null;
-  return mp.get(actorId, 'locationalData') || mp.get(actorId, 'pos') || null;
+  try {
+    return mp.get(actorId, 'locationalData') || mp.get(actorId, 'pos') || null;
+  } catch (err) {
+    return null;
+  }
 }
 
 function getCell(loc) {

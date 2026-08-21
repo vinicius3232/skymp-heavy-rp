@@ -1,8 +1,8 @@
 # Fase 0 — Roteiro de teste in-game
 
-**O único bloqueio real do projeto.** 578 testes automatizados passam, e nada nunca rodou numa sessão com jogador. Enquanto este roteiro não for executado, tudo o mais é qualidade sobre código não validado.
+**O único bloqueio real do projeto.** 1270 testes automatizados passam, e nada nunca rodou numa sessão com jogador. Enquanto este roteiro não for executado, tudo o mais é qualidade sobre código não validado.
 
-> Substitui o `GOVERNANCE_MARKET_STALLS_TEST_PLAN.md` (13/07/2026), que cobria governança e barracas. Desde então entraram `death-service`, `/painel`, VOIP, master API de sessão e a fila — e o gamemode passou de ~15 para **mais de 60 comandos**. Aquele plano descrevia camadas; este descreve **passos, o que observar, e o que significa falhar**.
+> Substitui o [`GOVERNANCE_MARKET_STALLS_TEST_PLAN.md`](../historico/GOVERNANCE_MARKET_STALLS_TEST_PLAN.md) (13/07/2026), que cobria governança e barracas. Desde então entraram `death-service`, `/painel`, VOIP, master API de sessão e a fila — e o gamemode passou de ~15 para **mais de 60 comandos**. Aquele plano descrevia camadas; este descreve **passos, o que observar, e o que significa falhar**.
 
 **Quem precisa:** 2 pessoas (A e B) com Skyrim SE/AE. Uma terceira (C) só na etapa 6.
 **Tempo:** ~60 minutos se nada quebrar. Se quebrar, você para e anota — é para isso que serve.

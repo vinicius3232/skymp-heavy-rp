@@ -34,6 +34,16 @@ const path = require('path');
 
 const num = (min, max) => ({ type: 'number', min, max });
 const bool = () => ({ type: 'boolean' });
+/**
+ * Opção de texto restrita a uma lista fechada.
+ *
+ * Nasceu com `voice.*.effect`: um efeito de voz é uma escolha de gameplay
+ * ("amordaçado soa abafado ou só mais baixo?") e portanto precisa ser
+ * configurável, mas um texto livre viraria exatamente o furo que o
+ * `voice_mode` do socket já foi — um valor que o resto do sistema não sabe
+ * interpretar, virando silêncio sem log. Aqui o valor inválido aborta o boot.
+ */
+const oneOf = (values) => ({ type: 'enum', values });
 
 /**
  * Cada entrada é `'caminho.da.opcao': { ...regra, default, usedBy }`.
@@ -51,7 +61,54 @@ const SPEC = {
 
   'spawn.playerRespawnSeconds': { ...num(0, 3600), default: 5, usedBy: 'death-service.js (RESPAWN_DELAY_MS)' },
 
-  'economy.startingGold': { ...num(0, 1000000), default: 0, usedBy: 'whitelist.js (ouro inicial do personagem)' }
+  'economy.startingGold': { ...num(0, 1000000), default: 0, usedBy: 'whitelist.js (ouro inicial do personagem)' },
+
+  'profession.maxPerCharacter': { ...num(1, 20), default: 3, usedBy: 'profession-service.js (grantProfession/reactivateProfession)' },
+  'profession.maxRank': { ...num(0, 20), default: 3, usedBy: 'profession-service.js (setProfessionRank)' },
+
+  'mining.xpPerGather': { ...num(0, 1000), default: 2, usedBy: 'mining-service.js (registerMiningInteractions)' },
+  // Alcance físico do veio, não de conversa — não reaproveita `core/proximity-ranges.js`
+  // (aquelas são distâncias de fala/voz). Valor de julgamento, não descoberto em
+  // nenhuma fonte SkyMP: perto o suficiente pra exigir estar de fato ao lado do
+  // veio, sem exigir pixel-perfect. Ver docs/gameplay/MINING.md §1.
+  'mining.maxDistance': { ...num(50, 1000), default: 200, usedBy: 'mining-service.js (registerMiningInteractions)' },
+
+  'crafting.xpPerCraft': { ...num(0, 1000), default: 2, usedBy: 'crafting-service.js (craftItem)' },
+
+  // ── Voz: como o estado do personagem muda a voz ────────────────────────────
+  //
+  // Nenhum destes números está escrito na `VoicePolicyEngine`. Ela lê daqui, e
+  // os testes derivam daqui — do mesmo jeito que nenhum teste de alcance
+  // escreve `450`. O motivo é o mesmo: um servidor que ache que amordaçar
+  // deveria calar por completo, ou que abatido deveria continuar falando
+  // normal, muda o jogo editando o JSON, e não editando a política.
+  //
+  // `rangeModifier` multiplica o alcance do modo (whisper/normal/shout);
+  // `gainModifier` multiplica o volume final. 1 = sem efeito, 0 = inaudível.
+  'voice.downed.canSpeak': { ...bool(), default: true, usedBy: 'core/voice/voice-conditions.js (abatido)' },
+  'voice.downed.rangeModifier': { ...num(0, 1), default: 0.35, usedBy: 'core/voice/voice-conditions.js (abatido)' },
+  'voice.downed.gainModifier': { ...num(0, 1), default: 0.6, usedBy: 'core/voice/voice-conditions.js (abatido)' },
+  'voice.downed.effect': { ...oneOf(['none', 'faint', 'muffled']), default: 'faint', usedBy: 'core/voice/voice-conditions.js (abatido)' },
+
+  'voice.gagged.canSpeak': { ...bool(), default: true, usedBy: 'core/voice/voice-conditions.js (amordaçado)' },
+  'voice.gagged.rangeModifier': { ...num(0, 1), default: 0.3, usedBy: 'core/voice/voice-conditions.js (amordaçado)' },
+  'voice.gagged.gainModifier': { ...num(0, 1), default: 0.4, usedBy: 'core/voice/voice-conditions.js (amordaçado)' },
+  'voice.gagged.effect': { ...oneOf(['none', 'faint', 'muffled']), default: 'muffled', usedBy: 'core/voice/voice-conditions.js (amordaçado)' },
+
+  // Inconsciente e morto não falam — isso não é configurável, é o que as duas
+  // palavras significam. O que é configurável é se eles OUVEM: um servidor que
+  // queira "você desmaia mas continua escutando a cena" muda aqui.
+  'voice.unconscious.canHear': { ...bool(), default: false, usedBy: 'core/voice/voice-conditions.js (inconsciente)' },
+  'voice.dead.canHear': { ...bool(), default: false, usedBy: 'core/voice/voice-conditions.js (morto)' },
+
+  // Corte do filtro passa-baixa que o cliente aplica por efeito, em Hz.
+  // Viajam uma vez no `auth_ok`, não por quadro. Ver skymp/ui/index.html.
+  'voice.effects.muffledLowpassHz': { ...num(120, 20000), default: 700, usedBy: 'skymp/ui/index.html (BiquadFilterNode)' },
+  'voice.effects.faintLowpassHz': { ...num(120, 20000), default: 2400, usedBy: 'skymp/ui/index.html (BiquadFilterNode)' },
+
+  // Áudio espacial no cliente. Desligar cai no ganho puro (o comportamento da
+  // Etapa 2), que é o que se quer se o PannerNode custar caro na CEF.
+  'voice.spatial.enabled': { ...bool(), default: true, usedBy: 'core/voice/voice-core.js e skymp/ui/index.html' }
 };
 
 /**
@@ -102,6 +159,12 @@ function validateValue(dottedPath, value, rule) {
     }
     if (value < rule.min || value > rule.max) {
       return `${dottedPath}: ${value} fora do intervalo permitido [${rule.min}, ${rule.max}]`;
+    }
+    return null;
+  }
+  if (rule.type === 'enum') {
+    if (typeof value !== 'string' || !rule.values.includes(value)) {
+      return `${dottedPath}: esperado um de [${rule.values.join(', ')}], veio ${JSON.stringify(value)}`;
     }
     return null;
   }

@@ -42,6 +42,11 @@ const { EmbedBuilder } = require('discord.js');
 const EVENT_KINDS = Object.freeze({
   ban:                { titulo: 'Banimento',            cor: 0x992d22, icone: '⛔' },
   kick:               { titulo: 'Expulsão',             cor: 0xe67e22, icone: '👢' },
+  // `voice_mute` é do `/calar` (admin-service). Fica ao lado de `kick` porque é
+  // a mesma permissão e a mesma classe de ação: moderação de cena. Cor mais
+  // fria de propósito — silenciar não é expulsar, e um canal de log em que as
+  // duas coisas pintam igual treina quem lê a não distinguir.
+  voice_mute:         { titulo: 'Voz silenciada',       cor: 0x546e7a, icone: '🔇' },
   permakill:          { titulo: 'Permakill',            cor: 0x71368a, icone: '⚰️' },
   whitelist_approve:  { titulo: 'Whitelist aprovada',   cor: 0x2ecc71, icone: '✅' },
   whitelist_reject:   { titulo: 'Whitelist recusada',   cor: 0xe74c3c, icone: '❌' },

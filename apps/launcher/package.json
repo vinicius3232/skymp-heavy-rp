@@ -7,7 +7,7 @@
   "scripts": {
     "dev": "vite",
     "//test": "Logica pura de paridade de modpack. O resto do main.ts depende de Electron e nao e testavel sem ele.",
-    "test": "node --test electron/parity.test.mjs",
+    "test": "node --test electron/parity.test.mjs electron/voice-dist.test.mjs",
     "typecheck": "tsc -b",
     "//build": "`tsc -b` e nao `tsc`: o tsconfig.json da raiz e um solution file com `files: []`, entao `tsc` sozinho nao checava projeto nenhum — o build passava com erro de tipo em src/ e em electron/.",
     "build": "tsc -b && vite build && electron-builder",

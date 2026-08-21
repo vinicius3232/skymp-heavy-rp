@@ -2,7 +2,7 @@
 
 Data: 2026-07-13
 
-> ⚠️ **Superado por [FASE_0_ROTEIRO.md](FASE_0_ROTEIRO.md)** (06/08/2026). Este plano cobre governança e barracas; desde ele entraram `death-service`, `/painel`, VOIP, master API de sessão e a fila, e o gamemode passou de ~15 para mais de 60 comandos. Mantido como referência da validação visual (camada 5), que o roteiro novo não cobre.
+> ⚠️ **Superado por [FASE_0_ROTEIRO.md](../technical/FASE_0_ROTEIRO.md)** (06/08/2026). Este plano cobre governança e barracas; desde ele entraram `death-service`, `/painel`, VOIP, master API de sessão e a fila, e o gamemode passou de ~15 para mais de 60 comandos. Mantido como referência da validação visual (camada 5), que o roteiro novo não cobre.
 
 ## Objetivo
 

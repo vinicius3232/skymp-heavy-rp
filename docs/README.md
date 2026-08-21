@@ -2,7 +2,11 @@
 
 Mapa dos documentos do projeto. Se você acabou de chegar, leia na ordem da primeira seção.
 
-> **Última conferência contra o código: 11/08/2026.** README, arquitetura, plano principal, design da Alma, roadmap ativo e changelog foram reconciliados com o commit `c23179d`. Documentos de handoff e pesquisa são registros datados: quando superados, preservam o contexto histórico e recebem aviso explícito. Se você encontrar um documento afirmando algo que o código não faz, isso é um bug — [abra uma issue](https://github.com/vinicius3232/skymp-heavy-rp/issues) ou corrija no seu PR.
+> **Última conferência contra o código: 14/08/2026, commit `e39e506`.** A rodada rodou as cinco suítes e conferiu cada número afirmado: gamemode **1270/1270** + 13/13 checks, launcher **74/74**, game-api **48/48**, painel web 40/40, bot 40/40; migrations até a **v16**; **doze** módulos registrados e **cinco** PARKED. O que estava errado e foi corrigido: `QA_REPORT` (nas quatro línguas) declarava 444, 24 e 30 testes e listava o `trade-service` como PARKED; `ARCHITECTURE` (nas quatro) parava nas migrations `v13` e dizia que a voz esperava um patch de client que já foi **descartado**; o `README` mandava o leitor para um plano de teste superado; e `FASE_0_ROTEIRO` dizia 578 testes.
+>
+> Documentos de handoff e pesquisa são registros datados: quando superados, preservam o contexto histórico, recebem aviso explícito e vão para [`historico/`](#histórico). Se você encontrar um documento afirmando algo que o código não faz, isso é um bug — [abra uma issue](https://github.com/vinicius3232/skymp-heavy-rp/issues) ou corrija no seu PR.
+>
+> **Números datados dentro de documento datado não são bug.** Uma auditoria de 13/08 que diz "716 testes" está descrevendo o dia dela e continua correta. O que não pode envelhecer é o documento que se apresenta como **estado atual** — e são só estes: [`QA_REPORT`](technical/QA_REPORT_2026-08.md), [`ARCHITECTURE`](ARCHITECTURE.md), [`FASE_0_ROTEIRO`](technical/FASE_0_ROTEIRO.md), o [`README`](../README.md) e este índice.
 
 ---
 
@@ -13,8 +17,12 @@ Mapa dos documentos do projeto. Se você acabou de chegar, leia na ordem da prim
 | 0 | [CONSTITUICAO.md](CONSTITUICAO.md) | **A constituição de design.** O que o projeto é, o que nunca criar, e por que toda mecânica precisa responder "como isso gera histórias?". O Anexo A traz as tensões conhecidas dela. |
 | 1 | [QA_REPORT_2026-08.md](technical/QA_REPORT_2026-08.md) | **O estado real de cada componente**, incluindo o que não está pronto e o plano priorizado. É o documento mais honesto do projeto. |
 | 2 | [ARCHITECTURE.md](ARCHITECTURE.md) | Como banco, painel web, bot, API do jogo, launcher e gamemode conversam. |
-| 2.1 | [research/ADMIN_PLATFORM_AUDIT.md](research/ADMIN_PLATFORM_AUDIT.md) | **O estado real do painel de staff.** Doze rotas administrativas, zero verificações de permissão — e o que mais a auditoria de 13/08 encontrou. Leia antes de `skyadmin/`. |
-| 2.2 | [skyadmin/README.md](skyadmin/README.md) | Centro de orientação do painel de staff: escopo, arquitetura, plano, segurança, operação e referências. **É projeto, não estado** — ver a §7 da auditoria acima. |
+| 2.1 | [admin/AUTHORIZATION_MATRIX.md](admin/AUTHORIZATION_MATRIX.md) | **Quem pode o que, hoje.** Rota x capability x cargo minimo nos tres servicos, com as quatro negacoes e o que continua reservado. |
+| 2.2 | [admin/ADMIN_ACTION_PIPELINE.md](admin/ADMIN_ACTION_PIPELINE.md) | **Por onde toda acao administrativa passa.** As oito etapas, o envelope, os cinco desfechos, e a regra que sustenta tudo: identidade e alvo sao resolvidos pelo servidor, nunca aceitos do pedido. |
+| 2.3 | [admin/AUDIT_LOG.md](admin/AUDIT_LOG.md) | **Os cinco fluxos de registro, e a auditoria que virou tabela.** Por que `rp_chat` afogava a aba Audit Log em minutos, o que e coluna e o que e JSON, e a migration que nao toca em nada do que existe. |
+| 2.4 | [admin/SKYADMIN_CURRENT_STATE.md](admin/SKYADMIN_CURRENT_STATE.md) | **O estado da plataforma administrativa em 15/08.** Trinta funcionalidades mapeadas uma a uma, as três permissões sem porta, as tabelas mortas que o painel ainda lê, e o que deve ser reaproveitado em vez de reconstruído. Leia antes de `skyadmin/`. |
+| 2.5 | [research/ADMIN_PLATFORM_AUDIT.md](research/ADMIN_PLATFORM_AUDIT.md) | A auditoria de 13/08 que abriu a linha: doze rotas administrativas, zero verificações de permissão. Continua válida; o documento acima a estende. |
+| 2.6 | [skyadmin/README.md](skyadmin/README.md) | Centro de orientação do painel de staff: escopo, arquitetura, plano, segurança, operação e referências. **É projeto, não estado** — ver a §7 da auditoria acima. |
 | 3 | [../CONTRIBUTING.md](../CONTRIBUTING.md) | As regras que não são óbvias lendo o código. Quase todas existem porque alguém já quebrou aquilo. |
 | 4 | [../CHANGELOG.md](../CHANGELOG.md) | O que mudou em cada versão — e o que sabidamente não está pronto. |
 
@@ -33,6 +41,7 @@ Mapa dos documentos do projeto. Se você acabou de chegar, leia na ordem da prim
 | [PLUGIN_LOAD_ORDER_STRATEGY.md](technical/PLUGIN_LOAD_ORDER_STRATEGY.md) | Por que o primeiro byte do FormID é o índice do plugin, por que **ESL não existe no SkyMP**, e o que o nosso gate de paridade ainda deixa passar. |
 | [SKYMP_PATCH_POLICY.md](technical/SKYMP_PATCH_POLICY.md) | Quando patch, quando adapter, quando extensão de cliente, quando PR — e o que mudou quando o upstream passou a exigir cessão de direito autoral. |
 | [`core/skymp-adapter/`](../skymp/gamemode/core/skymp-adapter/README.md) | A fronteira declarada contra o motor: identidade, Papyrus e detecção de capacidade. Só os boundaries que a auditoria provou instáveis. |
+| [REVISAO_REALIDADE_COMPARTILHADA.md](technical/REVISAO_REALIDADE_COMPARTILHADA.md) | **Quais sistemas nossos dependem de os dois clientes verem a mesma coisa** — e o que o SkyMP realmente sincroniza por baixo deles. Derivado das §8 e §9 da referência upstream; foi o que derrubou premissas do `death-service`. |
 | [MODS_AND_GAMEMODE_CONTRACT.md](technical/MODS_AND_GAMEMODE_CONTRACT.md) | O que acontece com um mod dentro de um cliente conectado. Responde "esse mod funciona no servidor?" com critério. |
 | [SKYMP_SERVER_SETUP.md](technical/SKYMP_SERVER_SETUP.md) | Instalação e configuração do servidor SkyMP. |
 | [OPERATIONS.md](technical/OPERATIONS.md) | Runbook: subir, conferir schema, quem pode o quê, portas, e o que fazer quando algo dá errado. |
@@ -45,7 +54,16 @@ Mapa dos documentos do projeto. Se você acabou de chegar, leia na ordem da prim
 | [LAUNCHER_DISTRIBUTION.md](technical/LAUNCHER_DISTRIBUTION.md) | Como cliente e modpack chegam ao jogador, como a paridade é verificada, e a assinatura do instalador (§6). |
 | [PUBLIC_BUILD_GUIDE.md](technical/PUBLIC_BUILD_GUIDE.md) | O que precisa estar verdadeiro antes de publicar a build pra comunidade. |
 | [LICENSE_AND_AFFILIATION_POLICY.md](technical/LICENSE_AND_AFFILIATION_POLICY.md) | Licenças do SkyMP por subprojeto, o que cada situação obriga, e não-afiliação. |
-| [SKYVOICE_LIVEKIT_AUDIT.md](technical/SKYVOICE_LIVEKIT_AUDIT.md) | **Comece por aqui para qualquer coisa de voz.** Auditoria do VOIP atual + validação do LiveKit. Corrige a versão da CEF (é a **108**, não "~70"), mostra por que `getUserMedia` falha de verdade, e traz o spike que provou o transporte A→SFU→B contra um `livekit-server` real. A §12 diz o que continua bloqueado: ninguém ouviu. |
+| [SKYVOICE_E2E_ETAPA_5.md](technical/SKYVOICE_E2E_ETAPA_5.md) | **A costura entre o launcher e o microfone, e os cinco defeitos que ela revelou.** O maior: o launcher subia um `voice-helper.exe` que **recusava os próprios argumentos** e morria com código 2 em toda execução — e reportava sucesso. Agora a cadeia `pareamento → microfone WASAPI → voip-service → política → ouvinte` roda com áudio real medido (400 quadros entregues, PTT/distância/célula medidos por efeito). Continua **NÃO TESTADO EM SKYRIM**: ninguém ouviu, e o LiveKit segue sem cliente dos dois lados. |
+| [SKYVOICE_CLIENT_ARCHITECTURE.md](technical/SKYVOICE_CLIENT_ARCHITECTURE.md) | **Onde vive o cliente LiveKit do jogador, e por quê.** As três arquiteturas avaliadas (helper C++, CEF/JS, sidecar), a matriz de decisão, e a escolha provada contra um SFU real: 9/9 verificações, incluindo o `UpdateSubscriptions` do gamemode concedendo audiência a um cliente C++ de verdade. Corrige a auditoria anterior — o SDK C++ está em **1.7.0 com binário pré-compilado**, não 1.0.0 exigindo Rust. Registra duas armadilhas de observabilidade medidas e o problema aberto entre espacialização e AEC. |
+| [ADR_006_SKYVOICE_CLIENT_RTC.md](technical/ADR_006_SKYVOICE_CLIENT_RTC.md) | A decisão em uma página: o cliente RTC vive no `voice-helper`. Por que a CEF foi rejeitada (duas identidades por jogador, e nada disso é testável hoje) e por que o sidecar não compra nada que o helper já não tenha. |
+| [SKYVOICE_CLIENT_E2E_MATRIX.md](testing/SKYVOICE_CLIENT_E2E_MATRIX.md) | A matriz de teste do cliente, com **as colunas não executadas em branco**. Skyrim e Humano estão inteiramente vazias, e é essa a informação. |
+| [SKYVOICE_PRODUCTION_READINESS.md](technical/SKYVOICE_PRODUCTION_READINESS.md) | **Comece por aqui para saber se a voz está pronta. Ela não está.** Relatório final da Etapa 4, com a tabela FEATURE/STATUS/TEST/RESULT/RISK, os números medidos (200 jogadores **simulados**, p95 de 11.7 ms) e o gargalo que decide a arquitetura: o relay legado precisaria de ~5,3 Gbit/s dentro do processo do gamemode num evento de 200 pessoas. Três bloqueios críticos continuam abertos. |
+| [SKYVOICE_SECURITY_AUDIT.md](technical/SKYVOICE_SECURITY_AUDIT.md) | Auditoria de segurança completa, e os três defeitos reais que ela achou — entre eles o gateway do LiveKit que **nunca falou com o SFU** porque nenhum caminho de produção passava um emissor de token de operador. Privacidade executável: uma varredura que reprova gravação, vídeo, flags de CEF inseguras e rádio. |
+| [SKYVOICE_DEPLOYMENT.md](technical/SKYVOICE_DEPLOYMENT.md) | Subir e operar: portas, firewall, DNS, TLS, TURN, health checks, restart, logs, troubleshooting, e como trocar self-hosted ↔ Cloud sem tocar em gameplay. Os arquivos estão em `deploy/livekit/` — e **nenhum `docker compose up` foi executado contra eles**. |
+| [SKYVOICE_LIVEKIT_AUDIT.md](technical/SKYVOICE_LIVEKIT_AUDIT.md) | **A origem da arquitetura de voz.** Auditoria do VOIP atual + validação do LiveKit. Corrige a versão da CEF (é a **108**, não "~70"), mostra por que `getUserMedia` falha de verdade, e traz o spike que provou o transporte A→SFU→B contra um `livekit-server` real. A §12 diz o que continua bloqueado: ninguém ouviu. |
+| [SKYVOICE_CORE_ETAPA_2.md](technical/SKYVOICE_CORE_ETAPA_2.md) | O Voice Core: quem decide quem ouve quem, o índice espacial que derrubou o tick de 2 s para 150 ms, e o bench que mede isso e sai 1 se a meta não for atingida. A §11 é o checklist de teste humano — é ele que destrava os blockers #1 e #2. |
+| [SKYVOICE_CORE_ETAPA_3.md](technical/SKYVOICE_CORE_ETAPA_3.md) | **A voz como gameplay.** A `VoicePolicyEngine` com uma porta só para morto/inconsciente/abatido/amordaçado/silenciado, áudio espacial na CEF 108, oclusão em três níveis (o 2 estudado e o 3 recusado, com motivo), estado de fala e HUD. A §12 lista 17 coisas não testadas — a primeira continua sendo que ninguém ouviu. |
 | [VOICE_CLIENT_PATCH.md](technical/VOICE_CLIENT_PATCH.md) | Runbook do patch de client que o VOIP nativo precisava e que não existe upstream — **descartado**, e mantido porque explica por que a captura saiu do navegador. O bloco no topo corrige a versão da CEF e acrescenta o terceiro motivo da rejeição. |
 | [VOICE_NATIVE_HELPER.md](technical/VOICE_NATIVE_HELPER.md) | O caminho de voz que **existe e captura hoje**, e o Plano B da migração. WASAPI fora do CEF, relay pelo servidor, primeiro build e primeira captura medida (§8.3, §8.4). A §8.2 diz o que continua sem prova: ninguém ouviu. |
 | [VOICE_FORK_AUDIT_SKYMP_VGR_2026-08-11.md](technical/VOICE_FORK_AUDIT_SKYMP_VGR_2026-08-11.md) | O único fork com voz LiveKit ponta a ponta no fonte — e as lacunas dele (`proximityLoop` que não inicia, API de posição aberta sem autenticação) que não devemos repetir. |
@@ -81,7 +99,7 @@ Mapa dos documentos do projeto. Se você acabou de chegar, leia na ordem da prim
 | [FASE_0_ROTEIRO.md](technical/FASE_0_ROTEIRO.md) | **O roteiro do teste in-game — o único bloqueio real do projeto.** Passo a passo, o que observar, o que significa falhar, e o registro pra preencher enquanto testa. Comece pelo guia acima. |
 | [FAUNA_CENSUS_PROTOCOL.md](technical/FAUNA_CENSUS_PROTOCOL.md) | Sessão separada do roteiro, e de outra natureza: **não há "passou" nem "falhou", só o que existe no mundo.** Como rodar o censo de fauna e a prova do cadáver — as duas perguntas que decidem se a mecânica de caça existe. |
 | [MOBS_LOOT_LAB_HANDOFF_2026-08-12.md](roadmap/MOBS_LOOT_LAB_HANDOFF_2026-08-12.md) | Resultado do boot instrumentado: NPCs estavam desabilitados por ausência de `npcEnabled`; configuração local corrigida, sondas carregadas e comandos da sessão in-game registrados. |
-| [GOVERNANCE_MARKET_STALLS_TEST_PLAN.md](technical/GOVERNANCE_MARKET_STALLS_TEST_PLAN.md) | Plano em camadas de 13/07, restrito a governança e barracas. Superado pelo roteiro acima. |
+| [historico/GOVERNANCE_MARKET_STALLS_TEST_PLAN.md](historico/GOVERNANCE_MARKET_STALLS_TEST_PLAN.md) | Plano em camadas de 13/07, restrito a governança e barracas. **Superado pelo roteiro acima** — ver [Histórico](#histórico). |
 
 ### Ciclo de hardening de 11/08/2026
 
@@ -97,6 +115,7 @@ Mapa dos documentos do projeto. Se você acabou de chegar, leia na ordem da prim
 | [technical/AUTH_001_TRUST_BOUNDARY_INVENTORY.md](technical/AUTH_001_TRUST_BOUNDARY_INVENTORY.md) | Inventário das identidades, tokens e fronteiras de confiança. |
 | [technical/AUTH_002_OPAQUE_TICKET_V1.md](technical/AUTH_002_OPAQUE_TICKET_V1.md) | Contrato de credencial opaca, hashing e redaction. |
 | [technical/CHR_001_ACCOUNT_SESSION_CHARACTER_IDENTITY.md](technical/CHR_001_ACCOUNT_SESSION_CHARACTER_IDENTITY.md) | Contrato de identidade entre conta, sessão e personagem. |
+| [technical/AUTH_LAUNCH_TICKET_ATOMICITY_AUDIT.md](technical/AUTH_LAUNCH_TICKET_ATOMICITY_AUDIT.md) | O consumo do launch ticket em `apps/game-api/server.js` é atômico por `UPDATE` condicional, sem `SELECT` antes — a auditoria que fecha a janela de corrida. |
 
 ### Pesquisa de forks
 
@@ -112,6 +131,51 @@ As duas rodadas cobrem conjuntos **diferentes** de projetos e se somam. A de 12/
 | [research/SKYMP_ECOSYSTEM_SYSTEM_MAP.md](research/SKYMP_ECOSYSTEM_SYSTEM_MAP.md) | Mapa dos sistemas encontrados nos forks estudados. |
 | [research/SKYMP_FORKS_SYSTEM_MATRIX.md](research/SKYMP_FORKS_SYSTEM_MATRIX.md) | Matriz comparativa dos forks. |
 | [technical/REFERENCE_STUDY_SKYMP_FORKS_2026-08-11.md](technical/REFERENCE_STUDY_SKYMP_FORKS_2026-08-11.md) | Estudo técnico consolidado e rastreável. |
+| [research/SKYMP_ARCHITECTURE_PATTERNS.md](research/SKYMP_ARCHITECTURE_PATTERNS.md) | Os padrões que a pesquisa recomendou adotar e os que recomendou recusar — `intent → validação → transação → evento → projeção`, identidade em quatro camadas, manifesto autenticado, sessões opacas. |
+| [research/HEAVY_RP_GAP_ANALYSIS.md](research/HEAVY_RP_GAP_ANALYSIS.md) | Gap analysis por área, com evidência e próximo gate. **Nenhum domínio que dependa de sessão multiplayer real recebeu `COMPLETE`** — é a tabela que mais depende da Fase 0. |
+| [roadmap/FORK_RESEARCH_ROADMAP.md](roadmap/FORK_RESEARCH_ROADMAP.md) | A sequência e os gates propostos pela rodada de 12/08. **Não substitui** o `SKYMP_RP_DEVELOPMENT_PLAN.md`, e nenhum módulo PARKED deve ser registrado como consequência automática dele. |
+
+#### Dossiês por fork (rodada de 12/08)
+
+Os nove documentos abaixo são a leitura individual de cada fork, e é neles que estão as citações de arquivo e linha que as matrizes resumem. Consulte quando a matriz disser *o quê* e você precisar do *onde*.
+
+[01 SkyrimRoleplay](research/forks/01-SKYRIMROLEPLAY.md) · [02 enricomalta](research/forks/02-ENRICOMALTA.md) · [03 F02K](research/forks/03-F02K.md) · [04 NirnRP](research/forks/04-NIRNRP.md) · [05 TheZebco](research/forks/05-THEZEBCO.md) · [06 FusRoBra](research/forks/06-FUSROBRA.md) · [07 DonAthelion](research/forks/07-DONATHELION.md) · [08 PepsiPlaya](research/forks/08-PEPSIPLAYA.md) · [09 outros forks](research/forks/09-OTHER-FORKS.md)
+
+---
+
+## Frameworks: os caminhos obrigatórios
+
+Três coisas no gamemode têm **um caminho só**, e escrever um módulo que não passe por ele é o erro que estes documentos existem para impedir. Cada framework tem a mesma tripla: o **contrato** (como usar), a **decisão** (por que é assim) e a **matriz de teste** (o que está travado e o que não está).
+
+| Framework | Contrato | Decisão | Matriz de teste | Auditoria que o originou |
+|---|---|---|---|---|
+| **Interação** — clique em alvo | [INTERACTION_FRAMEWORK.md](framework/INTERACTION_FRAMEWORK.md) | [ADR 002](technical/ADR_002_INTERACTION_FRAMEWORK.md) | [INTERACTION_TEST_MATRIX.md](testing/INTERACTION_TEST_MATRIX.md) | [CORE_FRAMEWORK_AUDIT.md](research/CORE_FRAMEWORK_AUDIT.md) |
+| **Inventário** — item que muda de dono | [INVENTORY_FRAMEWORK.md](framework/INVENTORY_FRAMEWORK.md) | [ADR 003](technical/ADR_003_INVENTORY_SOURCE_OF_TRUTH.md) | [INVENTORY_TRANSACTION_MATRIX.md](testing/INVENTORY_TRANSACTION_MATRIX.md) | [INVENTORY_TRADE_CRAFTING_AUDIT.md](research/INVENTORY_TRADE_CRAFTING_AUDIT.md) |
+| **Economia** — dinheiro que se move | [ECONOMY_FRAMEWORK.md](framework/ECONOMY_FRAMEWORK.md) | [ADR 004](technical/ADR_004_ECONOMY_ACCOUNTS_AND_LEDGER.md) | [ECONOMY_SECURITY_MATRIX.md](testing/ECONOMY_SECURITY_MATRIX.md) | [ECONOMY_FRAMEWORK_AUDIT.md](research/ECONOMY_FRAMEWORK_AUDIT.md) |
+
+| Documento | Sobre |
+|---|---|
+| [framework/MODULE_SYSTEM.md](framework/MODULE_SYSTEM.md) | O que é um módulo, o que ele declara e quando o registry decide subi-lo. É a peça abaixo dos três frameworks acima. |
+| [technical/ADR_001_ONLINE_PROFILE_ID_IS_ACCOUNT_ID.md](technical/ADR_001_ONLINE_PROFILE_ID_IS_ACCOUNT_ID.md) | **IMPLEMENTADO.** O `profileId` do caminho online representa o `accountId` interno; o Discord ID é atributo externo, nunca identidade. |
+| [research/CORE_FRAMEWORK_AUDIT.md](research/CORE_FRAMEWORK_AUDIT.md) | A auditoria que precede o Interaction Framework: o que já resolvia o problema, o que resolvia pela metade, e o que estava no caminho. Onde documento e código discordaram, o código venceu. |
+
+---
+
+## Sistemas de gameplay
+
+Cada um é um serviço com documento próprio. **A etiqueta de estado é a informação mais importante da tabela** — PARKED significa que o serviço existe no disco e nunca sobe.
+
+| Sistema | Estado | Documento |
+|---|---|---|
+| **Troca entre jogadores** | Registrado como `trade`, atrás de `ENABLE_TRADE_SERVICE` (nasce `false`). Sem UI CEF, nunca rodou em sessão real. | [gameplay/TRADE_SYSTEM.md](gameplay/TRADE_SYSTEM.md) |
+| **Contratos** | Um jogador publica trabalho, outro aceita, o servidor move os septims. Sem NPC e sem fila de staff. | [gameplay/CONTRACTS.md](gameplay/CONTRACTS.md) |
+| **Dívida** | Registro selado e legível — **nunca** cobrança automática. | [gameplay/DEBT_SYSTEM.md](gameplay/DEBT_SYSTEM.md) |
+| **Crafting** | **PARKED.** Foi migrado para o Inventory Framework, e migrar **não** é reativar. | [gameplay/CRAFTING_SYSTEM.md](gameplay/CRAFTING_SYSTEM.md) |
+| **Profissões** | **LAB.** Core implementado (grant/revoke/rank/xp), atrás de `ENABLE_PROFESSION_SERVICE`. Nenhuma profissão tem gameplay por trás ainda. | [gameplay/PROFESSION_FRAMEWORK.md](gameplay/PROFESSION_FRAMEWORK.md) |
+| **Nós de recurso** | Motor genérico implementado (capacidade, regen, coleta atômica). Primeiro consumidor: Minerador (abaixo). | [gameplay/RESOURCE_NODE_FRAMEWORK.md](gameplay/RESOURCE_NODE_FRAMEWORK.md) |
+| **Minerador** | **LAB.** Interação `mining.mine` (alvo `object`, distância medida pelo Interaction Framework), atrás de `ENABLE_MINING_SERVICE`. Suposição não validada em jogo: `mp.get(formId,'locationalData')` contra objeto comum. | [gameplay/MINING.md](gameplay/MINING.md) |
+
+---
 
 ---
 
@@ -130,6 +194,10 @@ As duas rodadas cobrem conjuntos **diferentes** de projetos e se somam. A de 12/
 
 | Documento | Sobre |
 |---|---|
+| [admin/AUDIT_LOG.md](admin/AUDIT_LOG.md) | **APPLICATION LOG, AUDIT LOG, SECURITY EVENT, GAMEPLAY EVENT e METRIC** — o que cada um e, onde vive e por que. A tabela `audit_events` com colunas indexadas, busca em onze eixos, e o backfill que copia sem mover. |
+| [admin/ADMIN_ACTION_PIPELINE.md](admin/ADMIN_ACTION_PIPELINE.md) | **A camada comum das acoes administrativas.** Oito etapas, um envelope, cinco desfechos; o que cada superficie pode afirmar e o que o servidor sempre reresolve. Inclui as cinco acoes de voz que existiam e ninguem conseguia invocar. |
+| [admin/AUTHORIZATION_MATRIX.md](admin/AUTHORIZATION_MATRIX.md) | **A matriz que vale hoje.** Toda rota dos tres servicos, a capability que a protege e o cargo minimo; as 20 capabilities ativas e as 10 reservadas; o que mudou para o moderador. |
+| [admin/SKYADMIN_CURRENT_STATE.md](admin/SKYADMIN_CURRENT_STATE.md) | **Estado atual (15/08).** Mapa por funcionalidade — backend, frontend, permissão, auditoria, banco, status, problema — das trinta superfícies administrativas, da whitelist à voz. Inclui a administração de VOIP, que é posterior à auditoria de 13/08. |
 | [research/ADMIN_PLATFORM_AUDIT.md](research/ADMIN_PLATFORM_AUDIT.md) | **Auditoria de 13/08.** O que existe hoje: dois sistemas de permissão que não se conhecem, três permissões que nada verifica, ban construído pela metade, e o teto real do que a API `mp` permite fazer com jogador conectado. |
 | [admin/ADMIN_PLATFORM.md](admin/ADMIN_PLATFORM.md) | O painel alvo: catorze módulos, cinco fases, o fluxo de uma ação — e por que `server.restart` e `modules.toggle` a quente ficam de fora. |
 | [admin/RBAC.md](admin/RBAC.md) | Catálogo de ~40 permissões, seis cargos, modelo de dados, contrato do middleware e a política de Discord. |
@@ -173,10 +241,22 @@ As duas rodadas cobrem conjuntos **diferentes** de projetos e se somam. A de 12/
 
 ## Histórico
 
+**Registro ativo** — este ainda se preenche:
+
 | Documento | Sobre |
 |---|---|
-| [roadmap/PHASE_0_TEST_LOG.md](roadmap/PHASE_0_TEST_LOG.md) | Evidências dos testes da Fase 0 (11/07/2026 — boot de servidor, `offlineMode=true`). |
 | [roadmap/FASE_0_LOG_2026-08-06.md](roadmap/FASE_0_LOG_2026-08-06.md) | Registro da execução do [roteiro atual](technical/FASE_0_ROTEIRO.md). Etapa 0 preenchida; o resto aguarda a sessão com dois jogadores. |
+| [roadmap/MOBS_LOOT_LAB_HANDOFF_2026-08-12.md](roadmap/MOBS_LOOT_LAB_HANDOFF_2026-08-12.md) | Resultado do boot instrumentado, e os comandos da sessão in-game que ficaram registrados para ela. |
+
+**Superados — [`historico/`](historico/)**. Ficam porque explicam *por que* decisões foram tomadas, e cada um abre com o aviso do que mudou desde então. **Nenhum descreve o estado atual; não cite nenhum como evidência.**
+
+| Documento | O que preserva |
+|---|---|
+| [historico/PHASE_0_TEST_LOG.md](historico/PHASE_0_TEST_LOG.md) | O **primeiro boot de servidor** do projeto (11/07/2026, `offlineMode=true`, gamemode mínimo). Única prova documental daquele boot. |
+| [historico/GOVERNANCE_MARKET_STALLS_TEST_PLAN.md](historico/GOVERNANCE_MARKET_STALLS_TEST_PLAN.md) | O plano em camadas de 13/07, superado pelo [roteiro](technical/FASE_0_ROTEIRO.md). Mantido pela camada 5 (validação visual), que o roteiro novo não cobre. |
+| [historico/CLAUDE_HANDOFF_IMPLEMENTACOES_E_PESQUISA_2026-08-11.md](historico/CLAUDE_HANDOFF_IMPLEMENTACOES_E_PESQUISA_2026-08-11.md) | Por que fronteiras de confiança, economia transacional e idempotência de barracas foram feitas nessa ordem. Descreve a voz como relay próprio — leia o [SkyVoice](technical/SKYVOICE_PRODUCTION_READINESS.md) em vez disso. |
+| [historico/CODEX_PRE_CLAUDE_HANDOFF_2026-08-12.md](historico/CODEX_PRE_CLAUDE_HANDOFF_2026-08-12.md) | As invariantes acordadas na passagem de bastão — elas continuam valendo; o estado descrito não. |
+| [historico/C0_01_CURRENT_SNAPSHOT_HANDOFF.md](historico/C0_01_CURRENT_SNAPSHOT_HANDOFF.md) | O snapshot que virou o commit `c23179d`. Árvore dirty e ownership temporário são do momento do handoff. |
 
 ---
 

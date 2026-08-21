@@ -2,7 +2,7 @@
 
 Este diretório é o ponto de entrada para construir o painel administrativo e de staff do SkyMP Heavy RP. Ele não substitui a documentação existente: organiza as decisões e indica a fonte de verdade de cada tema.
 
-> **Leia antes: [`../research/ADMIN_PLATFORM_AUDIT.md`](../research/ADMIN_PLATFORM_AUDIT.md) (13/08/2026).**
+> **Leia antes: [`../admin/SKYADMIN_CURRENT_STATE.md`](../admin/SKYADMIN_CURRENT_STATE.md) (15/08/2026)** — o mapa funcionalidade a funcionalidade do que roda hoje, incluindo a administração de voz — e a auditoria que o precede, [`../research/ADMIN_PLATFORM_AUDIT.md`](../research/ADMIN_PLATFORM_AUDIT.md) (13/08/2026).
 > Este diretório descreve **intenção**; a auditoria mediu o **estado**. A §7 dela reconcilia marco a marco — dos seis marcos do [plano](IMPLEMENTATION_PLAN.md), só o Marco 1 tem entrega verificável. A única frase deste diretório que descreve o presente é a lista de "Estado atual" logo abaixo.
 > Os desdobramentos da auditoria vivem em [`../admin/`](../admin/ADMIN_PLATFORM.md) e em [ADR 005](../technical/ADR_005_ADMIN_RBAC.md), que decide o RBAC do Marco 2.
 
@@ -32,7 +32,7 @@ Este diretório é o ponto de entrada para construir o painel administrativo e d
 | Limites de confiança | [../technical/AUTH_001_TRUST_BOUNDARY_INVENTORY.md](../technical/AUTH_001_TRUST_BOUNDARY_INVENTORY.md) |
 | Operação do SkyMP | [../technical/OPERATIONS.md](../technical/OPERATIONS.md), [../technical/SKYMP_SERVER_SETUP.md](../technical/SKYMP_SERVER_SETUP.md) |
 | Critério de whitelist | [../staff/WHITELIST_RUBRIC.md](../staff/WHITELIST_RUBRIC.md) |
-| Migrations e schema | `skymp/packages/database/schema.sql` e migrations `v2`–`v13` |
+| Migrations e schema | `skymp/packages/database/schema.sql` e migrations `v2`–`v16` |
 | Regras do servidor | [../rules/HEAVY_RP_RULES.md](../rules/HEAVY_RP_RULES.md) |
 
 ## Convenção

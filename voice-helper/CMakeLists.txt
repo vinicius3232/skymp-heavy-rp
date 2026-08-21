@@ -18,6 +18,7 @@ endif()
 
 find_package(ixwebsocket CONFIG REQUIRED)
 find_package(nlohmann_json CONFIG REQUIRED)
+find_package(Opus CONFIG REQUIRED)
 
 add_executable(voice-helper src/main.cpp)
 
@@ -30,6 +31,7 @@ endif()
 target_link_libraries(voice-helper PRIVATE
   ixwebsocket::ixwebsocket
   nlohmann_json::nlohmann_json
+  Opus::opus
 )
 
 if(WIN32)
@@ -54,3 +56,30 @@ if(MSVC)
 else()
   target_compile_options(voice-helper PRIVATE -Wall -Wextra)
 endif()
+
+# Alvo separado, de propósito: reframe_10ms.h não depende de miniaudio nem de
+# ixwebsocket, e amarrar o teste ao executável principal obrigaria linkar
+# WASAPI só pra verificar um corte de vetor. Sem framework de teste — é um
+# arquivo, `assert`/prints bastam.
+add_executable(reframe-10ms-test src/reframe_10ms.test.cpp)
+target_compile_features(reframe-10ms-test PRIVATE cxx_std_17)
+if(MSVC)
+  target_compile_options(reframe-10ms-test PRIVATE /W4)
+else()
+  target_compile_options(reframe-10ms-test PRIVATE -Wall -Wextra)
+endif()
+
+enable_testing()
+add_test(NAME reframe_10ms COMMAND reframe-10ms-test)
+
+# Testa a MESMA configuração de Opus que `RunSession` usa em produção
+# (VOIP, 48kHz, mono, 24 kbit/s) — sem miniaudio nem ixwebsocket, só o codec.
+add_executable(opus-roundtrip-test src/opus_roundtrip.test.cpp)
+target_link_libraries(opus-roundtrip-test PRIVATE Opus::opus)
+target_compile_features(opus-roundtrip-test PRIVATE cxx_std_17)
+if(MSVC)
+  target_compile_options(opus-roundtrip-test PRIVATE /W4)
+else()
+  target_compile_options(opus-roundtrip-test PRIVATE -Wall -Wextra)
+endif()
+add_test(NAME opus_roundtrip COMMAND opus-roundtrip-test)

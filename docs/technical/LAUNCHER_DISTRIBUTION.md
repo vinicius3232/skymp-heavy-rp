@@ -155,6 +155,17 @@ Para um servidor mantido por uma pessoa, o **Azure Trusted Signing** é o caminh
 
 **Este documento não decide qual comprar.** A escolha depende de a pessoa ter CNPJ com a idade que a Microsoft exige, e de quanto o projeto quer gastar por ano.
 
+**Esta compra cobre dois binários, não um.** `voice-helper.exe` (voz por
+proximidade, `docs/technical/VOICE_NATIVE_HELPER.md` §9 item 3) também
+precisa de assinatura, pelo mesmo `signtool` — e com um perfil de risco pra
+SmartScreen/antivírus provavelmente **maior** que o instalador: é um binário
+sem reputação nenhuma que abre socket de rede e acessa microfone, lançado
+silenciosamente por outro processo. Com Azure Trusted Signing isso não muda o
+custo — a assinatura é cobrada por mês, não por binário. O pipeline dele já
+existe (`.github/workflows/release-voice-helper.yml`) e já lê os MESMOS
+`WINDOWS_CSC_LINK`/`WINDOWS_CSC_KEY_PASSWORD` — não precisa de segredo novo
+quando o certificado for comprado.
+
 **2. Confirmar o SmartScreen na mão.** Isto **não é automatizável** e não está no workflow. Reputação de SmartScreen é construída pela Microsoft ao longo de downloads reais; a única verificação possível é:
 
 1. Baixar o instalador pelo navegador (não `curl` — o SmartScreen reage à marca de origem que o navegador grava no arquivo).

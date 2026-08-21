@@ -1,5 +1,13 @@
 # Handoff pré-Claude — 2026-08-12
 
+> ⚠️ **Registro histórico, superado (14/08/2026).** O escopo abaixo foi entregue
+> e absorvido pelo `main`. Preservado porque registra as invariantes acordadas na
+> passagem de bastão — elas continuam valendo, o estado descrito não. Os números
+> desta página (547/547) são do dia; hoje a suíte do gamemode está em 1270/1270.
+> A biblioteca de credenciais opacas, descrita aqui como "ainda sem integração no
+> runtime", já está integrada. Estado atual em
+> [`QA_REPORT_2026-08.md`](../technical/QA_REPORT_2026-08.md).
+
 ## Escopo concluído pelo Codex
 
 - ADR da identidade online: `profileId` representa o `accountId` interno; Discord ID é atributo externo.

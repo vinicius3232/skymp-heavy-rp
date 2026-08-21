@@ -59,15 +59,52 @@ npm test           # inclui permissions.behavior.test.js
 
 A autoridade de staff vem **exclusivamente** da tabela `staff_roles`. O campo `vip_level` em `accounts` é só monetização e **nunca** deve ser usado como critério administrativo.
 
-A matriz vigente está em [`permissions.behavior.test.js`](../../skymp/gamemode/permissions.behavior.test.js) — o teste é o registro. Resumo:
+O mapa cargo→permissão vive em **[`skymp/gamemode/core/permissions.js`](../../skymp/gamemode/core/permissions.js)** — um lugar só, consultado pelo gamemode, pelo painel web e (via `POST /internal/authorize`) pelo bot do Discord. O inventário completo de rota × capability × cargo mínimo está em [`AUTHORIZATION_MATRIX.md`](../admin/AUTHORIZATION_MATRIX.md).
 
-| Ação | moderator | admin | owner |
-|---|---|---|---|
-| `/anim`, `/tp` | ✅ | ✅ | ✅ |
-| `/kick` | ✅ | ✅ | ✅ |
-| `/additem` | ❌ | ✅ | ✅ |
-| `/setgold` | ❌ | ✅ | ✅ |
-| `/permakill` | ❌ | ✅ | ✅ |
+Duas coisas que mudam a operação do dia a dia:
+
+- **Cargo fora do catálogo nega tudo, dos dois lados, e grita no log.** Inserir `role='support'` em `staff_roles` não cria um cargo — cria uma conta que não consegue fazer nada, em jogo nem no painel. Os cargos são `moderator`, `admin` e `owner`.
+- **Conta não-`active` não entra no painel**, mesmo tendo linha em `staff_roles`.
+
+A matriz vigente está em [`permissions.behavior.test.js`](../../skymp/gamemode/permissions.behavior.test.js) e em [`core/permissions.test.js`](../../skymp/gamemode/core/permissions.test.js) — o teste é o registro. Resumo dos comandos:
+
+| Ação | Permission | moderator | admin | owner |
+|---|---|---|---|---|
+| `/tp` | `players.teleport` | ✅ | ✅ | ✅ |
+| `/anim` | `players.animate` | ✅ | ✅ | ✅ |
+| `/kick` | `players.kick` | ✅ | ✅ | ✅ |
+| `/calar`, `/vozdiag`, … | `voice.mute` | ✅ | ✅ | ✅ |
+| `/additem` | `inventory.grant` | ❌ | ✅ | ✅ |
+| `/setgold` | `economy.adjust` | ❌ | ✅ | ✅ |
+| `/permakill` | `characters.retire` | ❌ | ✅ | ✅ |
+| `/revelaridentidade` | `identity.reveal` | ❌ | ✅ | ✅ |
+| `/censofauna`, `/sondacadaver` | `world.probe` | ❌ | ✅ | ✅ |
+
+**Todo comando de staff atravessa o pipeline comum** ([`core/admin-action.js`](../../skymp/gamemode/core/admin-action.js), documentado em [`ADMIN_ACTION_PIPELINE.md`](../admin/ADMIN_ACTION_PIPELINE.md)): sessão, permissão, validação, alvo, estado, serviço de domínio, desfecho, auditoria. Três consequências operacionais:
+
+- **`/kick`, `/setgold` e `/revelaridentidade` passaram a exigir motivo.** Antes o `/kick` caía para `'Sem motivo'` e os outros dois não pediam nada. A mensagem de uso diz o que falta.
+- **Os cinco comandos de voz passaram a existir.** `/calar`, `/descalar`, `/vozdiag`, `/vozdesconectar` e `/vozreconectar` estavam implementados, com permissão e auditoria, e sem registro nenhum — digitá-los respondia "Comando desconhecido".
+- **Toda negação e toda falha viram linha em `audit_logs`**, com a etapa em que pararam. Para ver o que foi barrado:
+
+```sql
+SELECT * FROM audit_events WHERE outcome = 'denied' ORDER BY id DESC;
+```
+
+**A auditoria mudou de tabela.** `audit_logs` recebia treze escritores que não gravavam a mesma coisa — inclusive `rp_chat:*`, uma linha por FALA de cada jogador —, e a aba Audit Log do painel afogava em conversa de taverna com o servidor cheio. A ação administrativa passou a viver em **`audit_events`**, com colunas indexadas e busca em onze eixos; `audit_logs` continua existindo, intacta, como o fluxo de evento de jogo. Ver [`AUDIT_LOG.md`](../admin/AUDIT_LOG.md).
+
+A migration é a **v17** e é segura: não altera, não apaga e não move nada — ela COPIA para a tabela nova o que é auditoria, e é reexecutável. Depois de aplicar, confira:
+
+```sql
+SELECT
+  (SELECT COUNT(*) FROM audit_logs
+    WHERE action LIKE 'admin:%' OR action LIKE 'authz:%' OR action LIKE 'staff:%'
+       OR action LIKE 'whitelist:%' OR action LIKE 'governance:%'
+       OR action = 'identity:staff_reveal')  AS origem,
+  (SELECT COUNT(*) FROM audit_events
+    WHERE legacy_audit_log_id IS NOT NULL)   AS copiadas;
+```
+
+Os nomes antigos (`kick`, `set_gold`, …) continuam funcionando: são traduzidos por `LEGACY_ALIASES`. A exceção é `ban`, que era concedida a `admin`/`owner` e nunca foi verificada em lugar nenhum — ela virou uma capability **reservada** e agora nega explicitamente, com motivo no log, em vez de descrever um poder inexistente.
 
 `/permakill` nunca chega ao moderador de propósito: morte permanente é revisão de staff sênior, não decisão de linha de frente.
 
