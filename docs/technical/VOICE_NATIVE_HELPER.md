@@ -299,6 +299,10 @@ quadros foi a sonda, não um microfone.
 
 4. **Qualquer coisa fora de `127.0.0.1`.** Latência, perda e jitter de rede real
    não foram exercitados; o jitter buffer de 60ms nunca viu um pacote atrasado.
+   **Parcialmente resolvido em 20/08/2026 — ver §8.6**, só para o lado do
+   locutor: captura e envio sustentaram uma sessão real de ~85s pela internet,
+   sem descarte. O lado do ouvinte, com jitter de rede de verdade, continua sem
+   teste.
 
 ## 8. Bloqueio: não há toolchain C++ nesta máquina
 
@@ -468,6 +472,35 @@ tanto para este helper quanto para o spike de LiveKit em
 `spikes/skyvoice-livekit-cpp/` (commit `79dd5bd`), que fechou pelo mesmo
 motivo: "NINGUÉM OUVIU" como blocker #1. É julgamento humano, não medição, e
 continua sendo o único passo do roteiro que não pode ser feito por um agente.
+
+### 8.6 Primeiro teste solo por um humano, em rede real — 20/08/2026
+
+Um dev (`adm.thiago`) rodou o `voice-helper.exe` do build oficial contra um
+servidor real na internet (`104.234.65.67:7778`, não `127.0.0.1`), modo direto,
+com `actorId` e ticket reais:
+
+```
+.\voice-helper.exe --actor-id 0xFF000002 --ticket ec5e3064a867dcc301c6712e84c97af3 --host 104.234.65.67 --port 7778
+[helper] Conectado em ws://104.234.65.67:7778; autenticando como sender.
+[helper] Autenticado. Capturando; Ctrl+C pra sair.
+...
+[helper] Encerrando. 4264 quadros enviados.
+[helper] Conexao fechada pelo servidor.
+```
+
+**O que isto prova:** ~85s de captura e envio (4264 quadros / 50/s) por uma
+rede real, sem um único "descartado na fila" nos logs periódicos, e
+encerramento limpo por Ctrl+C seguido do servidor fechando a conexão — não uma
+queda. É o primeiro dado da §7/§9 item 10 (rede real) e do item 4 de "não foi
+verificado" que não é `127.0.0.1`.
+
+**O que isto NÃO prova:** era um teste solo, sem ouvinte pareado — nenhum
+`listener` estava conectado para receber esses quadros. Não valida o relay sob
+rede real, não valida o jitter buffer sob latência real, e continua sem
+resolver o único bloqueio que falta desde a §7: **ninguém ouviu**. O próximo
+passo natural é repetir isto com um segundo terminal/pessoa autenticado como
+`listener` no mesmo `actorId` de audiência, pra fechar esse teste com alguém
+de verdade escutando.
 
 ## 9. Próxima rodada — listado, não implementado
 
