@@ -207,9 +207,24 @@ test('falha — SFU lento não pendura o laço de proximidade', async () => {
 
     core.attach(1000, { characterId: 1 });
 
-    const t0 = Date.now();
-    const r = await gateway.removeParticipant('actor-1-aaaa');
-    const elapsed = Date.now() - t0;
+    // Keep-alive de teste, não de produção: em Node 20, um `AbortSignal.timeout`
+    // sem NENHUM outro handle referenciado segurando o event loop pode nunca
+    // disparar — o test runner encontra o loop "vazio" antes do timer do abort
+    // rodar, e a promise acima (que só resolve/rejeita no evento `abort`) fica
+    // pendurada para sempre: 'Promise resolution is still pending but the event
+    // loop has already resolved', cancelando em cascata todo teste seguinte
+    // NESTE arquivo. Confirmado por reprodução isolada contra Node 20 real
+    // (CI): sem este guard, falha sempre; com ele, passa sempre — e o gateway
+    // de produção não muda em nada, continua só com `AbortSignal.timeout`.
+    const guardaEventLoop = setTimeout(() => {}, 200);
+    let r, elapsed;
+    try {
+      const t0 = Date.now();
+      r = await gateway.removeParticipant('actor-1-aaaa');
+      elapsed = Date.now() - t0;
+    } finally {
+      clearTimeout(guardaEventLoop);
+    }
 
     assert.strictEqual(r.ok, false);
     assert.ok(elapsed < 2000, `a chamada demorou ${elapsed} ms — o timeout não agiu`);
