@@ -40,8 +40,14 @@ function isExpired(row) {
   return row.expires_at !== null && new Date(row.expires_at) <= clockNow;
 }
 
+/** Atraso artificial só no SELECT de reidratação — simula um tick lento sob carga (Tarefa 6). */
+let rehydrateSelectDelayMs = 0;
+
 async function fakeQuery(sql, params = []) {
   const normalized = sql.replace(/\s+/g, ' ').trim();
+  if (rehydrateSelectDelayMs > 0 && /^SELECT id, base_id, pos_x, pos_y, pos_z, angle_z FROM world_objects/i.test(normalized)) {
+    await new Promise((resolve) => setTimeout(resolve, rehydrateSelectDelayMs));
+  }
 
   if (/^INSERT INTO world_objects/i.test(normalized)) {
     const hasTtl = params.length === 9;
@@ -159,6 +165,7 @@ function resetar() {
   giveItemCalls = [];
   placeAtMeCalls = [];
   despawnCalls = [];
+  rehydrateSelectDelayMs = 0;
   cellPersistence._resetInMemoryCaches();
   try { interactionRegistry._reset(); } catch { /* alguns testes reidratam o registry sozinhos */ }
 
@@ -694,5 +701,43 @@ describe('cell-persistence — interacao world_object.pickup (Tarefa 5)', () => 
       /already_gone/
     );
     assert.equal(giveItemCalls.length, 0);
+  });
+});
+
+describe('cell-persistence — tick sobreposto (achado da prontidao pra Fase 0, Tarefa 6)', () => {
+  beforeEach(resetar);
+
+  it('um segundo tick disparado enquanto o primeiro ainda roda e pulado, nao reidrata em dobro', async () => {
+    atoresAtivos = [ATOR];
+    posicoes[ATOR] = { pos: [0, 0, 0], cellOrWorldDesc: CELULA_A };
+    await cellPersistence.recordDrop({ actorId: ATOR, characterId: 901, baseId: 0x10, count: 1, category: 'weapon', value: 0 });
+    cellPersistence._resetInMemoryCaches();
+    placeAtMeCalls = [];
+
+    // Simula um SELECT de reidratacao lento — e a janela em que, sem o
+    // guarda de _tickInFlight, um segundo tick concorrente reidrataria a
+    // mesma celula de novo.
+    rehydrateSelectDelayMs = 50;
+
+    const primeiro = cellPersistence.tick();
+    const segundo = cellPersistence.tick(); // dispara "em cima" do primeiro, como o setInterval faria sob carga
+    await Promise.all([primeiro, segundo]);
+
+    assert.equal(placeAtMeCalls.length, 1, 'o segundo tick deveria ter sido pulado, nao reidratar a celula de novo');
+  });
+
+  it('depois que o primeiro tick termina, um novo tick funciona normalmente', async () => {
+    atoresAtivos = [ATOR];
+    posicoes[ATOR] = { pos: [0, 0, 0], cellOrWorldDesc: CELULA_A };
+    await cellPersistence.recordDrop({ actorId: ATOR, characterId: 901, baseId: 0x10, count: 1, category: 'weapon', value: 0 });
+    cellPersistence._resetInMemoryCaches();
+    placeAtMeCalls = [];
+
+    await cellPersistence.tick(); // reidrata CELULA_A pra ATOR
+
+    posicoes[ATOR] = { pos: [500, 500, 0], cellOrWorldDesc: CELULA_B };
+    await cellPersistence.tick(); // celula nova — deveria processar normalmente, guarda ja liberado
+
+    assert.equal(cellPersistence._lastCellByActor.get(ATOR), CELULA_B, 'tick apos o guarda liberar deveria processar a troca de celula normalmente');
   });
 });

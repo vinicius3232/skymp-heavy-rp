@@ -5,7 +5,7 @@
 > Substitui o `GOVERNANCE_MARKET_STALLS_TEST_PLAN.md` (13/07/2026), que cobria governança e barracas. Desde então entraram `death-service`, `/painel`, VOIP, master API de sessão e a fila — e o gamemode passou de ~15 para **mais de 60 comandos**. Aquele plano descrevia camadas; este descreve **passos, o que observar, e o que significa falhar**.
 
 **Quem precisa:** 2 pessoas (A e B) com Skyrim SE/AE. Uma terceira (C) só na etapa 6.
-**Tempo:** ~60 minutos se nada quebrar. Se quebrar, você para e anota — é para isso que serve.
+**Tempo:** ~75 minutos se nada quebrar (60 + 15 da Etapa 10, adicionada em 21/08/2026). Se quebrar, você para e anota — é para isso que serve.
 
 ---
 
@@ -24,7 +24,7 @@ Copie o [registro em branco](#registro) para um arquivo novo antes de começar e
 
 ## O que nunca rodou com jogador — índice único
 
-Oito sistemas carregam hoje a mesma etiqueta: **confirmado por teste automatizado, nunca confirmado em sessão real.** Eles estavam espalhados por três documentos, e quem preparava uma sessão precisava abrir os três para montar a lista. Esta tabela é a lista.
+Doze sistemas carregam hoje a mesma etiqueta: **confirmado por teste automatizado, nunca confirmado em sessão real.** Eles estavam espalhados por três documentos, e quem preparava uma sessão precisava abrir os três para montar a lista. Esta tabela é a lista.
 
 **Não duplica critério.** Cada linha aponta para o passo detalhado, e é lá que está o que significa passar ou falhar.
 
@@ -38,6 +38,10 @@ Oito sistemas carregam hoje a mesma etiqueta: **confirmado por teste automatizad
 | **Voz — nativa** | Helper com ticket, A fala e B escuta | Voz **inteligível** (não só "tem sinal"), volume por distância, sem eco | [8.2](#82-voz-de-verdade-com-o-helper-nativo-12-pessoas-20-min) · [`VOICE_NATIVE_HELPER.md`](VOICE_NATIVE_HELPER.md) §11 |
 | **Identidade — persistência** | Reconectar e reiniciar o servidor depois de `/apresentar` e `/apelido` | Conhecidos e apelidos **sobrevivem aos dois** | [3.5 e 3.6](#etapa-3--identidade-disfarce-e-persistência-8-min-a-e-b) · [`NAMETAG_IDENTITY_SYSTEM.md`](NAMETAG_IDENTITY_SYSTEM.md) |
 | **Nametag + `/revelaridentidade`** | `ENABLE_NAMETAG_SERVICE=true`, A olha B; depois um admin usa `/revelaridentidade` em B | A etiqueta **aparece e acompanha** B ao andar, mostra `Desconhecido` antes de `/apresentar`, e a revelação vira linha em `audit_logs` | [3.7](#etapa-3--identidade-disfarce-e-persistência-8-min-a-e-b) · [`NAMETAG_IDENTITY_SYSTEM.md`](NAMETAG_IDENTITY_SYSTEM.md) |
+| **AUTH-003 — bind de personagem** | Entrar normalmente (Etapa 1) e conferir `game_sessions.character_id` | Preenchido, não `NULL` | [1.7](#etapa-1--o-jogador-a-entra-10-min) |
+| **`cell-persistence` — sincronização de célula** | `ENABLE_CELL_PERSISTENCE_SERVICE=true`; A dropa um item **enquanto B já está na mesma célula** | B vê o objeto aparecer; correlacionar com o timestamp de `[SPAWN-SYNC]` no log do servidor | [10.1](#101-sincronização-de-célula--a-dropa-b-vê) |
+| **`cell-persistence` — pickup** | `/pegaritem <id>` (ou o menu, se 10.3 estiver de pé) | Item some do mundo, entra no inventário de quem pegou, e uma segunda tentativa no mesmo id falha | [10.2](#102-pickup--autoridade-final-do-servidor) |
+| **Gestos de RP** | `ENABLE_ANIMATION_SERVICE=true`; `/gesto acenar` | Animação em A (se `Actor.PlayIdle` aceitar string de evento — nunca visto) e mensagem de proximidade em B | [10.3](#103-gestos-de-rp-gesto) |
 
 ### Fora desta lista, e por quê
 
@@ -50,19 +54,21 @@ Oito sistemas carregam hoje a mesma etiqueta: **confirmado por teste automatizad
 
 Todas vão no `skymp/gamemode/.env`. A coluna diz **para qual etapa** cada uma existe, porque ligar tudo de uma vez não é o certo — ver as três ressalvas abaixo.
 
-| Flag | Etapas 1–7 | Etapa 8 (voz) | Etapa 9 | Observação |
-|---|---|---|---|---|
-| `ENABLE_GOVERNANCE_SERVICE` | `true` | — | — | |
-| `ENABLE_MARKET_STALLS_SERVICE` | `true` | — | — | 9.2.6 também usa |
-| `ENABLE_DEATH_SERVICE` | `true` | — | **`true`** | **Pré-requisito de 9.1**: o `hit-events` sobe dentro do `initDeathService` |
-| `ENABLE_PLAYER_PANEL_SERVICE` | `true` | — | — | |
-| `ENABLE_VOIP_SERVICE` | **`false`** | `true` | — | Deliberadamente desligado nas 1–7 (ver Etapa 0) |
-| `VOIP_DEBUG_EXPOSE_TICKET` | `false` | `true` | — | ⚠️ Credencial em texto puro no disco. Lida a cada `/voz`, então desligar **não** exige reiniciar |
-| `VOIP_PUBLIC_HOST` / `VOIP_BIND_HOST` | — | só entre máquinas | — | Padrão `127.0.0.1` só serve na mesma máquina |
-| `ENABLE_SOUL_SERVICE` | `false` | — | `true` só em 9.4 | Voltar para `false` ao fim da etapa |
-| `SOUL_SECRET` | — | — | **obrigatório em 9.4** | Escolha uma vez; trocar depois quebra quem já foi derivado |
-| `ENABLE_NAMETAG_SERVICE` | `true` só em 3.7 | — | — | Desligado por padrão. A projeção mundo→tela **nunca foi executada** — 3.7 é a primeira vez |
-| `ENABLE_NPC_CLEANER` | tanto faz | — | — | Inerte com a lista de bloqueio vazia |
+| Flag | Etapas 1–7 | Etapa 8 (voz) | Etapa 9 | Etapa 10 | Observação |
+|---|---|---|---|---|---|
+| `ENABLE_GOVERNANCE_SERVICE` | `true` | — | — | — | |
+| `ENABLE_MARKET_STALLS_SERVICE` | `true` | — | — | — | 9.2.6 também usa |
+| `ENABLE_DEATH_SERVICE` | `true` | — | **`true`** | — | **Pré-requisito de 9.1**: o `hit-events` sobe dentro do `initDeathService` |
+| `ENABLE_PLAYER_PANEL_SERVICE` | `true` | — | — | — | |
+| `ENABLE_VOIP_SERVICE` | **`false`** | `true` | — | — | Deliberadamente desligado nas 1–7 (ver Etapa 0) |
+| `VOIP_DEBUG_EXPOSE_TICKET` | `false` | `true` | — | — | ⚠️ Credencial em texto puro no disco. Lida a cada `/voz`, então desligar **não** exige reiniciar |
+| `VOIP_PUBLIC_HOST` / `VOIP_BIND_HOST` | — | só entre máquinas | — | — | Padrão `127.0.0.1` só serve na mesma máquina |
+| `ENABLE_SOUL_SERVICE` | `false` | — | `true` só em 9.4 | — | Voltar para `false` ao fim da etapa |
+| `SOUL_SECRET` | — | — | **obrigatório em 9.4** | — | Escolha uma vez; trocar depois quebra quem já foi derivado |
+| `ENABLE_NAMETAG_SERVICE` | `true` só em 3.7 | — | — | — | Desligado por padrão. A projeção mundo→tela **nunca foi executada** — 3.7 é a primeira vez |
+| `ENABLE_NPC_CLEANER` | tanto faz | — | — | — | Inerte com a lista de bloqueio vazia |
+| `ENABLE_CELL_PERSISTENCE_SERVICE` | — | — | — | **`true`** | AUTH-003/persistência já rodam sem esta flag (1.7 é core); esta flag só liga `/dropitem`, `/pegaritem` e a reidratação por polling |
+| `ENABLE_ANIMATION_SERVICE` | — | — | — | **`true`** só em 10.3 | `/gesto` — independente da flag acima, pode ligar junto ou separado |
 
 ### As três ressalvas — verificadas, não presumidas
 
@@ -113,8 +119,11 @@ Esta é a cadeia inteira: launcher → paridade → fila → sessão → master 
 | 1.4 | Confira `skymp_config.json` | Tem `session` preenchido | Sem isso o servidor não resolve identidade |
 | 1.5 | O jogo abre e conecta | A entra no mundo | Porta 7777. Se a UI não aparecer, veja `localhost:9000` |
 | 1.6 | No banco: `SELECT * FROM game_sessions ORDER BY id DESC LIMIT 1` | Linha com `resolve_count >= 1` | **Se `resolve_count` for 0, o master API não foi chamado** — o servidor está em `offlineMode` ou o `master` não aponta para o painel |
+| 1.7 🔴 | Na mesma linha de 1.6, confira `character_id` | **Preenchido**, com o id do personagem de A | AUTH-003 (21/08/2026): o bind agora acontece no `/api/queue/join`, antes deste boot existir de fato — se vier `NULL`, o fallback de migração assumiu (`whitelist.js` avisa `Conta ... sem game_session vinculada` no log do gamemode). Uma sessão nova não deveria cair nesse fallback |
 
 > **1.6 é o teste mais importante do roteiro.** Ele prova que a identidade veio do servidor e não do cliente. Se falhar, todo o resto roda sobre identidade forjável.
+>
+> **1.7 nunca foi executado.** `apps/game-api.resolveApprovedCharacter` e o bind em `game_sessions.character_id` são código novo (AUTH-003) — testado com banco fake, nunca com MariaDB real nem com um jogador de verdade entrando na fila.
 
 ---
 
@@ -423,6 +432,49 @@ Consequência prática: **9.4 testa a alma e o sinal, não a consequência.** Re
 
 ---
 
+## Etapa 10 — Persistência de célula, pickup e gestos (15 min, A e B) 🔴
+
+Tarefa 6 (21/08/2026): preparação para este exato teste. Os três subsistemas abaixo nunca rodaram com cliente conectado — `PlaceAtMe`, `Game.getCurrentCrosshairRef()` e `Actor.PlayIdle` aceitando string de evento são todos **inferência de documentação, não observação**. Ver `docs/technical/PERSISTENCE_AUDIT.md` e o ADENDO no cabeçalho de `cell-persistence-service.js`.
+
+Ligue `ENABLE_CELL_PERSISTENCE_SERVICE=true` (e `ENABLE_ANIMATION_SERVICE=true` pra 10.3) e reinicie antes de começar.
+
+### 10.1 Sincronização de célula — A dropa, B vê?
+
+Isto é o item 2 da Tarefa 6: medir se o spawn chega a tempo, não só se chega.
+
+**Preparação:** A e B na mesma célula, **B já parado ali antes de A dropar** — isto testa a replicação nativa do objeto, não a reidratação (reidratação só dispara quando alguém *entra* numa célula nova; não é o caminho relevante aqui).
+
+| # | Faça | Espere | Se falhar |
+|---|---|---|---|
+| 10.1.1 | A: `/dropitem f 1 weapon 0` (Gold001 como arma de mentira, só pra ter uma `baseId` válida — troque por qualquer item confirmado no seu load order) | Uma linha `[cell-persistence] [SPAWN-SYNC] motivo=drop ...` no log do servidor, com timestamp | Sem a linha, o `INSERT` falhou antes do spawn — veja o log de erro logo acima dela |
+| 10.1.2 | **No instante em que a linha aparece**, olhe o relógio (ou grave a tela) | Anote o timestamp exato do log (`t=...`) | — |
+| 10.1.3 | B observa a própria tela | O objeto aparece no chão | Se não aparecer **nunca**, é falha grave — `PlaceAtMe` não está sincronizando pra outros clientes, só pro processo do servidor. Anote e pare 10.1 |
+| 10.1.4 | Anote, por relógio de parede ou gravação, quanto tempo entre 10.1.2 (log do servidor) e B ver o objeto | Diferença **abaixo de ~1s** é o esperado por qualquer replicação de rede decente; **vários segundos ou "só depois de B se mexer"** é delay que vale investigar | O servidor não tem como medir isto sozinho — é por isso que o log só dá o T=0, o resto é observação humana |
+
+**O que isto NÃO prova:** que o objeto está na posição certa, isso já é validado por outros meios (a coordenada vem do banco, não do spawn). 10.1 prova só **latência de aparição**, e só isso.
+
+### 10.2 Pickup — autoridade final do servidor
+
+| # | Faça | Espere | Se falhar |
+|---|---|---|---|
+| 10.2.1 | Anote o `id` do log de 10.1.1 (`world_objects.id=...`) | — | — |
+| 10.2.2 | B: `/pegaritem <id>` | B recebe o item no inventário; o objeto some do mundo | Se o item não chegar, confira `character_inventory` — pode ter sido `state='looted'` sem `giveItem` ter completado (ver `PERSISTENCE_AUDIT.md` §7) |
+| 10.2.3 | A tenta `/pegaritem <mesmo id>` logo em seguida | `Não foi possível pegar o item (already_gone)` | Se A conseguir pegar TAMBÉM, é duplicação de item — **pare e registre como crítico**, é exatamente o que o UPDATE condicional existe pra impedir |
+| 10.2.4 | `SELECT state FROM world_objects WHERE id = <id>` | `looted` | — |
+| 10.2.5 | Repita 10.1.1 com um item de categoria `misc` valor `0` (lixo, TTL curto) e espere 10 minutos sem pegar | `SELECT` na linha devolve **zero linhas** (`sweepExpired` limpou) | Se a linha persistir além do TTL, `sweepExpired` não está rodando — confira se `ENABLE_CELL_PERSISTENCE_SERVICE` segue ligado |
+
+### 10.3 Gestos de RP (`/gesto`)
+
+| # | Faça | Espere | Se falhar |
+|---|---|---|---|
+| 10.3.1 | A: `/gesto acenar`, B observando | Mensagem de proximidade `* <nome de A> acena.` chega em B | Se a mensagem chegar mas nenhuma animação tocar em A, é o resultado esperado até aqui — `Actor.PlayIdle` com string de evento nunca foi visto (ver cabeçalho de `animation-service.js`). **Registre separadamente**: mensagem ☐ / animação ☐ |
+| 10.3.2 | A repete `/gesto acenar` imediatamente | **Nada acontece** (cooldown de 3s) | Se repetir sem cooldown, o guard de spam está quebrado |
+| 10.3.3 | A: `/gesto empurrar` (não existe na allowlist) | Notificação com a lista de gestos válidos, nenhuma chamada ao Papyrus | — |
+
+**Ao terminar a etapa**, volte `ENABLE_CELL_PERSISTENCE_SERVICE` e `ENABLE_ANIMATION_SERVICE` para `false` se o ambiente não for permanecer em teste.
+
+---
+
 ## Registro
 
 Copie para um arquivo novo (`docs/roadmap/FASE_0_LOG_<data>.md`) e preencha durante o teste.
@@ -456,6 +508,11 @@ offlineMode: false ☐    Flags ENABLE_* ligadas: ___
 | 9.3 safe-zones    | ☐ | config carregou ☐ · `safe-zones.json` apagado ao fim ☐ |
 | 9.4 soul-service  | ☐ | primeiro sinal chegou ☐ · soma 200/150 ☐ · sem numero no `/alma` ☐ · semente fora do audit ☐ |
 | 9.4.7 alma congelada | ☐ | valores antes: ___ · depois de editar a ficha: ___ |
+| 1.7 AUTH-003 bind | ☐ | character_id: ___ |
+| 10.1 spawn-sync   | ☐ | apareceu em B ☐ · delay observado: ___ s |
+| 10.2 pickup       | ☐ | item recebido ☐ · segunda tentativa recusada (already_gone) ☐ · sem duplicação ☐ |
+| 10.2.5 TTL do lixo | ☐ | linha sumiu apos 10min ☐ |
+| 10.3 gestos       | ☐ | mensagem ☐ · animacao ☐ · cooldown ☐ · allowlist recusa gesto invalido ☐ |
 
 ## O que quebrou
 (erro exato, o que estava fazendo, o que o log disse)
@@ -483,6 +540,9 @@ Não é cerimônia. Cinco coisas estão **explicitamente esperando** o resultado
 | 2.2 (vitais reais) | Confirmar o formato do `self` em Papyrus in-game |
 | 9.1.3 + 9.1.4 (`combat:episode` com os dois lados resolvidos) | Apagar o `checkDamageSpike` — a heurística de 25 de vida que não sabe quem bateu só sai quando o evento de hit provar que chega |
 | 9.2 (`0x14` barrado) | Confirmar que a validação de item pega erro de digitação sem quebrar `/additem` — os dois modos de falha estão no mesmo teste |
+| 1.7 (`game_sessions.character_id` preenchido) | Fechar formalmente o SECURITY-BLOCKER AUTH-03 como validado em jogo, não só por teste automatizado |
+| 10.1 (delay de spawn aceitável) | Confirmar que `PlaceAtMe` serve como mecanismo de sincronização de mundo pra mais sistemas além de barraca/persistência — abre a porta pra estender o padrão |
+| 10.2 (sem duplicação no pickup) | Confirmar que o UPDATE condicional é suficiente sob concorrência real, não só nos testes com banco fake — libera considerar o mesmo padrão pra outros fluxos de "uso único" |
 | Tudo | Fase 1 da integração com a Chancelaria Real |
 | Tudo | O `soul-service` da Afinidade da Alma |
 

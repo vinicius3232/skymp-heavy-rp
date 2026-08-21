@@ -375,9 +375,10 @@ moduleRegistry.register({
     description: 'Larga um item no mundo, persistido pelo servidor',
     usage: '/dropitem <baseId hex> <quantidade> [categoria] [valor]'
   }, {
-    // Caminho utilizável hoje, enquanto `skymp/ui/index.html` não fala
-    // `interaction:*` (INTERACTION_FRAMEWORK.md §14) — mesmo padrão de
-    // `trade-service`, cujos comandos de chat são a interface inteira.
+    // Caminho utilizável hoje: a CEF já fala `interaction:*`, mas nada
+    // dispara o gatilho que abre o menu (`interaction:open` é listener morto
+    // — ver INTERACTION_FRAMEWORK.md §14, corrigido 21/08/2026). Mesmo padrão
+    // de `trade-service`, cujos comandos de chat são a interface inteira.
     name: '/pegaritem',
     handler: (actorId, args) => {
       const id = parseInt((args || '').trim(), 10);

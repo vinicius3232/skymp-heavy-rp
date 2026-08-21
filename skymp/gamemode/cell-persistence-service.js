@@ -121,13 +121,16 @@
  * `window.handleWorldObjectCrosshair(...)`, no mesmo padrão de
  * `nametag-service.SNIPPET_DO_CLIENTE` → `window.handleNametag`.
  *
- * **`skymp/ui/index.html` ainda não lê `window.handleWorldObjectCrosshair`
- * nem fala `interaction:*`** — isso já era verdade antes deste adendo
- * (`INTERACTION_FRAMEWORK.md` §14, "A CEF ainda não usa interaction:*") e
- * continua sendo um gap rastreado separadamente, não algo que este adendo
- * resolve. Por isso `/pegaritem <id>` existe: é o caminho utilizável HOJE,
- * mesmo padrão de `trade-service` ("NÃO tem UI CEF: os comandos de chat são a
- * interface inteira").
+ * **Correção de 21/08/2026 (Tarefa 6):** `skymp/ui/index.html` **já** fala
+ * `interaction:query`/`interaction:execute` de verdade pra alvo `player` —
+ * `INTERACTION_FRAMEWORK.md` §14 estava desatualizado nisso. O que falta não
+ * é o protocolo, é o **gatilho**: nada no repositório dispara
+ * `mp.events.add('interaction:open', ...)`, o mesmo padrão de listener morto
+ * que o próprio `index.html` já documenta ter existido pra `voip:connect`.
+ * `window.handleWorldObjectCrosshair` também não é lido ainda — ver o próximo
+ * passo concreto em `INTERACTION_FRAMEWORK.md` §14. Por isso `/pegaritem <id>`
+ * existe: é o caminho utilizável HOJE, mesmo padrão de `trade-service` ("NÃO
+ * tem UI CEF: os comandos de chat são a interface inteira").
  */
 
 const db = require('./database');
@@ -157,6 +160,28 @@ const JUNK_TTL_MS = 10 * 60 * 1000;
 const TICK_INTERVAL_MS = 2000;
 
 let _timer = null;
+
+/**
+ * Guarda contra ticks sobrepostos — achado da revisão de prontidão pra Fase 0
+ * (Tarefa 6, 21/08/2026): `setInterval` dispara a cada `TICK_INTERVAL_MS`
+ * **sem esperar o tick anterior terminar**. Com poucos jogadores um tick
+ * conclui bem antes dos 2s; sob carga (10 jogadores, cada um podendo disparar
+ * um `SELECT` de reidratação) um tick pode passar de 2s, e o próximo dispara
+ * em cima dele.
+ *
+ * O cenário real que isso evita: dois jogadores A e B entram na MESMA célula
+ * nova dentro da janela de um tick lento. `tick()` processa A primeiro e
+ * marca `_lastCellByActor` antes de aguardar `rehydrateCell` (protege A contra
+ * ser reprocessado), mas B só é alcançado depois que a `await` de A resolver
+ * — DENTRO do mesmo tick. Se um SEGUNDO tick começa nesse meio-tempo e
+ * também alcança B (que o primeiro tick ainda não processou), os dois ticks
+ * podem chamar `rehydrateCell` pra célula ainda não marcada em
+ * `_rehydratedCells` simultaneamente: dois `SELECT`, duas rodadas de
+ * `PlaceAtMe` pros mesmos objetos — referências duplicadas no mundo, uma das
+ * quais fica órfã (o `UPDATE ref_desc` da segunda sobrescreve o rastro da
+ * primeira).
+ */
+let _tickInFlight = false;
 
 /** actorId → cellId onde ele estava no último tick, para detectar troca sem evento. */
 const _lastCellByActor = new Map();
@@ -260,7 +285,7 @@ async function recordDrop({ actorId, characterId, baseId, count, category, value
         : [cellId, baseId, posX, posY, posZ, angleZ, category, characterId, Math.floor(ttlMs / 1000)]
     );
 
-    _spawnObject(actorId, { id: result.insertId, base_id: baseId, pos_x: posX, pos_y: posY, pos_z: posZ, angle_z: angleZ });
+    _spawnObject(actorId, { id: result.insertId, base_id: baseId, pos_x: posX, pos_y: posY, pos_z: posZ, angle_z: angleZ, cell_id: cellId }, 'drop');
     return { ok: true, id: result.insertId };
   } catch (err) {
     console.error('[cell-persistence] Falha ao gravar world_objects, devolvendo item:', err.message);
@@ -284,7 +309,28 @@ async function recordDrop({ actorId, characterId, baseId, count, category, value
  * Retorna o `refId` (número de servidor) ou `null` se não deu pra spawnar —
  * nunca lança: falha de spawn não pode derrubar `recordDrop`/`rehydrateCell`.
  */
-function _spawnObject(spawnerActorId, row) {
+/**
+ * Log de correlação para o protocolo de teste de dois clientes (Tarefa 6,
+ * item 2). O servidor não tem como saber quando o Jogador B efetivamente VIU
+ * o objeto aparecer — isso só o replicação nativa do SkyMP faz, e não expõe
+ * confirmação nenhuma pro gamemode. O que dá pra medir daqui é só o instante
+ * em que o SERVIDOR emitiu o `PlaceAtMe`; o protocolo de teste
+ * (`FASE_0_TWO_CLIENT_TEST_PROTOCOL.md`) usa esse timestamp como o "T=0" que
+ * a pessoa testando compara contra o relógio de parede de quando o objeto
+ * apareceu na tela do Jogador B.
+ *
+ * `[SPAWN-SYNC]` é o marcador — `grep SPAWN-SYNC` no log do servidor durante
+ * o teste isola só essas linhas.
+ */
+function _logSpawnSync(row, reason, refId) {
+  console.log(
+    `[cell-persistence] [SPAWN-SYNC] motivo=${reason} world_objects.id=${row.id} ` +
+    `baseId=0x${row.base_id.toString(16)} cell=${row.cell_id || 'desconhecida'} ` +
+    `refId=${refId ? '0x' + refId.toString(16) : 'FALHOU'} t=${new Date().toISOString()}`
+  );
+}
+
+function _spawnObject(spawnerActorId, row, reason = 'desconhecido') {
   // Entra no cache ANTES do spawn visual: é o que faz o objeto virar um alvo
   // resolvível (§ADENDO) mesmo se o PlaceAtMe falhar — a linha do banco já é
   // a fonte da verdade, e recusar o pickup só porque o marcador visual não
@@ -295,9 +341,13 @@ function _spawnObject(spawnerActorId, row) {
     ref_desc: null
   });
 
-  if (typeof mp === 'undefined' || typeof mp.callPapyrusFunction !== 'function') return null;
+  if (typeof mp === 'undefined' || typeof mp.callPapyrusFunction !== 'function') {
+    _logSpawnSync(row, reason, null);
+    return null;
+  }
   if (typeof mp.getDescFromId !== 'function') {
     console.warn('[cell-persistence] Spawn indisponível: mp.getDescFromId ausente, sem self válido pro Papyrus.');
+    _logSpawnSync(row, reason, null);
     return null;
   }
 
@@ -311,6 +361,7 @@ function _spawnObject(spawnerActorId, row) {
     const refId = placed?.desc && typeof mp.getIdFromDesc === 'function' ? mp.getIdFromDesc(placed.desc) : placed;
     if (!refId) {
       console.warn(`[cell-persistence] PlaceAtMe não devolveu referência para world_objects.id=${row.id}.`);
+      _logSpawnSync(row, reason, null);
       return null;
     }
 
@@ -325,9 +376,11 @@ function _spawnObject(spawnerActorId, row) {
         console.error(`[cell-persistence] Falha ao gravar ref_desc de world_objects.id=${row.id}:`, err.message);
       });
     }
+    _logSpawnSync(row, reason, refId);
     return refId;
   } catch (err) {
     console.error(`[cell-persistence] Falha ao spawnar world_objects.id=${row.id}:`, err.message);
+    _logSpawnSync(row, reason, null);
     return null;
   }
 }
@@ -428,7 +481,7 @@ async function rehydrateCell(cellId, spawnerActorId) {
   );
 
   for (const row of rows) {
-    _spawnObject(spawnerActorId, row);
+    _spawnObject(spawnerActorId, { ...row, cell_id: cellId }, 'rehydrate');
   }
 
   _rehydratedCells.add(cellId);
@@ -468,39 +521,54 @@ async function sweepExpired() {
 async function tick() {
   if (typeof mp === 'undefined') return;
 
-  const presentes = new Set();
-  for (const actorId of commands.listActiveActorIds()) {
-    presentes.add(actorId);
-    let loc;
-    try {
-      loc = mp.get(actorId, 'locationalData');
-    } catch {
-      continue;
-    }
-    if (!loc || !loc.pos) continue;
-
-    const cellId = _cellDesc(loc);
-    if (!cellId) continue;
-
-    const anterior = _lastCellByActor.get(actorId);
-    if (anterior === cellId) continue;
-
-    _lastCellByActor.set(actorId, cellId);
-    try {
-      await rehydrateCell(cellId, actorId);
-    } catch (err) {
-      console.error(`[cell-persistence] Falha ao reidratar célula ${cellId}:`, err.message);
-    }
+  // Ver o comentário de `_tickInFlight`: sem isto, um tick lento (muitos
+  // jogadores) e o próximo `setInterval` disparando em cima dele podem
+  // reidratar a mesma célula duas vezes. Pular o tick atrasado é seguro — o
+  // próximo tick (2s depois) processa os mesmos atores do mesmo jeito, então
+  // isto só atrasa a detecção de troca de célula, nunca perde uma.
+  if (_tickInFlight) {
+    console.warn('[cell-persistence] Tick anterior ainda em andamento — pulando este ciclo pra evitar reidratação em dobro.');
+    return;
   }
-
-  for (const actorId of _lastCellByActor.keys()) {
-    if (!presentes.has(actorId)) _lastCellByActor.delete(actorId);
-  }
+  _tickInFlight = true;
 
   try {
-    await sweepExpired();
-  } catch (err) {
-    console.error('[cell-persistence] Falha na varredura de expirados:', err.message);
+    const presentes = new Set();
+    for (const actorId of commands.listActiveActorIds()) {
+      presentes.add(actorId);
+      let loc;
+      try {
+        loc = mp.get(actorId, 'locationalData');
+      } catch {
+        continue;
+      }
+      if (!loc || !loc.pos) continue;
+
+      const cellId = _cellDesc(loc);
+      if (!cellId) continue;
+
+      const anterior = _lastCellByActor.get(actorId);
+      if (anterior === cellId) continue;
+
+      _lastCellByActor.set(actorId, cellId);
+      try {
+        await rehydrateCell(cellId, actorId);
+      } catch (err) {
+        console.error(`[cell-persistence] Falha ao reidratar célula ${cellId}:`, err.message);
+      }
+    }
+
+    for (const actorId of _lastCellByActor.keys()) {
+      if (!presentes.has(actorId)) _lastCellByActor.delete(actorId);
+    }
+
+    try {
+      await sweepExpired();
+    } catch (err) {
+      console.error('[cell-persistence] Falha na varredura de expirados:', err.message);
+    }
+  } finally {
+    _tickInFlight = false;
   }
 }
 
@@ -665,6 +733,7 @@ function initCellPersistenceService(deps = {}) {
 function shutdownCellPersistenceService() {
   if (_timer) clearInterval(_timer);
   _timer = null;
+  _tickInFlight = false;
   _lastCellByActor.clear();
   _rehydratedCells.clear();
   _activeObjectsById.clear();
@@ -685,6 +754,7 @@ function _resetInMemoryCaches() {
   _lastCellByActor.clear();
   _rehydratedCells.clear();
   _activeObjectsById.clear();
+  _tickInFlight = false;
 }
 
 module.exports = {
