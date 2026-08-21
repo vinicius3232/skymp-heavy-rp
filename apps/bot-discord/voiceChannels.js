@@ -20,21 +20,28 @@
 
 const {
   SlashCommandBuilder,
-  ChannelType,
-  PermissionFlagsBits
+  ChannelType
 } = require('discord.js');
+
+// `PermissionFlagsBits` saiu junto com `isStaffMember`: a permissão
+// `Administrator` da guild era metade da quarta fonte de autoridade que este
+// arquivo tinha. Ver staffAuthorization.js.
+const { explainDenial } = require('./staffAuthorization');
 
 const EMPTY_CHANNEL_GRACE_MS = 30 * 1000;
 
 // channelId -> { createdBy, emptyTimer }
 const _managedChannels = new Map();
 
-function isStaffMember(member, staffRoleId) {
-  if (!member) return false;
-  if (member.permissions.has(PermissionFlagsBits.Administrator)) return true;
-  if (staffRoleId && member.roles.cache.has(staffRoleId)) return true;
-  return false;
-}
+/**
+ * A capability que gerenciar canal de voz temporário exige.
+ *
+ * `voice.mute` e não uma nova: quem já pode silenciar a voz de alguém em jogo é
+ * exatamente quem organiza uma cena por voz, e criar uma capability própria para
+ * isto daria ao projeto mais uma para justificar sem que ninguém tivesse pedido.
+ * É moderador+, que é onde o portão do Discord já estava na prática.
+ */
+const VOICE_CHANNEL_PERMISSION = 'voice.mute';
 
 function sanitizeChannelName(raw) {
   const cleaned = String(raw || '').trim().slice(0, 60);
@@ -90,12 +97,28 @@ const commands = [
     .setDescription('[Staff] Fecha o canal de voz temporário atual')
 ];
 
-async function handleInteraction(interaction, { staffRoleId, voiceCategoryId }) {
+/**
+ * @param {any} interaction
+ * @param {{authorization: {authorize: Function}, voiceCategoryId?: string}} deps
+ *   `authorization` consulta o painel, que consulta o catálogo. O bot não
+ *   resolve cargo sozinho — ver `staffAuthorization.js`.
+ */
+async function handleInteraction(interaction, { authorization, voiceCategoryId }) {
   if (!interaction.isChatInputCommand()) return false;
   if (interaction.commandName !== 'voz-criar' && interaction.commandName !== 'voz-fechar') return false;
 
-  if (!isStaffMember(interaction.member, staffRoleId)) {
-    await interaction.reply({ content: 'Apenas staff pode gerenciar canais de voz temporários.', ephemeral: true });
+  if (!authorization || typeof authorization.authorize !== 'function') {
+    // Sem o cliente de autorização não há como saber quem é quem, e a resposta
+    // segura é negar. Um bot que libera quando não consegue perguntar libera
+    // todo mundo no minuto em que o painel cai.
+    console.error('[voice-channels] Cliente de autorizacao ausente: negando.');
+    await interaction.reply({ content: explainDenial('not_configured'), ephemeral: true });
+    return true;
+  }
+
+  const decisao = await authorization.authorize(interaction.user.id, VOICE_CHANNEL_PERMISSION);
+  if (!decisao.allowed) {
+    await interaction.reply({ content: explainDenial(decisao.reason), ephemeral: true });
     return true;
   }
 
@@ -164,7 +187,7 @@ module.exports = {
   commands,
   handleInteraction,
   handleVoiceStateUpdate,
-  isStaffMember,
+  VOICE_CHANNEL_PERMISSION,
   sanitizeChannelName,
   // Exposto só pra testes
   _managedChannels,

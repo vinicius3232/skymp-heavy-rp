@@ -161,21 +161,27 @@ function requireAuth(req, res, next) {
   res.status(401).json({ error: 'Não autenticado' });
 }
 
-// A autoridade de staff é derivada EXCLUSIVAMENTE da tabela `staff_roles`.
-// O campo `vip_level` em `accounts` é SOMENTE para monetização (VIP/Apoiador).
-// NUNCA usar vip_level como critério de permissão administrativa.
-async function requireStaff(req, res, next) {
-  if (!req.isAuthenticated || !req.isAuthenticated()) return res.status(401).json({ error: 'Nao autenticado' });
-  try {
-    const rows = await db('SELECT role FROM staff_roles WHERE account_id = ? LIMIT 1', [req.user.accountId]);
-    if (rows.length === 0) return res.status(403).json({ error: 'Acesso staff negado' });
-    req.staff = { role: rows[0].role };
-    return next();
-  } catch (err) {
-    console.error('[requireStaff]', err);
-    return res.status(500).json({ error: 'Erro interno do servidor' });
-  }
-}
+// ── Autorização ──────────────────────────────────────────────────────────────
+//
+// A autoridade de staff é derivada EXCLUSIVAMENTE da tabela `staff_roles`, e o
+// mapa cargo→permissão vem de `skymp/gamemode/core/permissions.js` — o mesmo
+// catálogo que o gamemode consulta. Não há uma segunda tabela aqui.
+//
+// O campo `vip_level` em `accounts` é SOMENTE para monetização (VIP/Apoiador) e
+// NUNCA é critério de permissão administrativa. A regra não mudou; o que mudou é
+// que agora existe um lugar só onde ela pode ser quebrada.
+//
+// `requireStaff` foi REMOVIDO. Ele aceitava qualquer cargo e protegia doze
+// rotas, incluindo a única mutável. Ver `apps/web/permissions.js`.
+const { createAuthorization, catalog: authorizationCatalog } = require('./permissions');
+const {
+  requirePermission,
+  recordDecision: recordAuthzDecision,
+  // O mesmo resolvedor que o middleware usa, reaproveitado pelo pipeline de
+  // ações. Duas leituras diferentes de `staff_roles` no mesmo processo seriam a
+  // divergência que este trabalho existe para remover.
+  resolveStaff
+} = createAuthorization({ db });
 
 app.get('/api/auth/discord', passport.authenticate('discord'));
 app.get('/api/auth/discord/callback', passport.authenticate('discord', {
@@ -284,7 +290,7 @@ app.post('/api/apply', requireAuth, async (req, res) => {
 });
 
 // ── API: Dashboard ─────────────────────────────────────────────────────────
-app.get('/api/dashboard', requireStaff, async (req, res) => {
+app.get('/api/dashboard', requirePermission('server.view'), async (req, res) => {
   try {
     const [accounts]    = await pool.execute('SELECT COUNT(*) as c FROM accounts');
     const [chars]       = await pool.execute('SELECT COUNT(*) as c FROM characters');
@@ -310,7 +316,7 @@ app.get('/api/dashboard', requireStaff, async (req, res) => {
 });
 
 // ── API: Whitelist ─────────────────────────────────────────────────────────
-app.get('/api/whitelist', requireStaff, async (req, res) => {
+app.get('/api/whitelist', requirePermission('whitelist.view'), async (req, res) => {
   try {
     const rows = await db(
       `SELECT wa.id, wa.status, wa.created_at, wa.reviewer_notes,
@@ -346,101 +352,65 @@ function notifyModerationLog(evento) {
     }).catch(e => console.error('[web] Falha ao enviar log de moderacao:', e.message));
 }
 
-app.patch('/api/whitelist/:id', requireStaff, async (req, res) => {
-  const { status, reviewer_notes, extra_review_notes } = req.body;
-  const validStatuses = ['approved', 'rejected', 'pending'];
-  if (!validStatuses.includes(status)) return res.status(400).json({ error: 'Status inválido' });
+/**
+ * Sincroniza o cargo de whitelist no Discord.
+ *
+ * Extraido para ca porque a acao passou a viver em `admin-actions.js` e ele nao
+ * conhece — nem deve conhecer — a URL do bot nem o segredo interno. Engole o
+ * proprio erro, como sempre engoliu: a decisao de whitelist ja esta gravada, e
+ * o Discord fora do ar nao pode desfaze-la.
+ */
+async function syncDiscordRole(discordId, status) {
   try {
-    await db(
-      'UPDATE whitelist_applications SET status=?, reviewer_notes=?, reviewed_at=NOW() WHERE id=?',
-      [status, reviewer_notes || null, req.params.id]
-    );
-
-    // Notas da staff sobre o conceito sinalizado como needs_extra_review (opcional).
-    if (typeof extra_review_notes === 'string' && extra_review_notes.trim()) {
-      await db(
-        `UPDATE characters c
-         INNER JOIN accounts a ON a.id = c.account_id
-         INNER JOIN whitelist_applications wa ON wa.account_id = a.id
-         SET c.extra_review_notes=?
-         WHERE wa.id=? AND c.status='pending'`, [extra_review_notes.trim(), req.params.id]
-      );
-    }
-
-    // Buscar o discord_id e account_id relacionados para notificar o bot e auditar
-    const idRows = await db(
-      `SELECT d.discord_id, a.id as account_id FROM discord_identities d
-       INNER JOIN accounts a ON a.id = d.account_id
-       INNER JOIN whitelist_applications wa ON wa.account_id = a.id
-       WHERE wa.id=?`, [req.params.id]
-    );
-
-    // Se aprovado, aprova também o personagem.
-    //
-    // `c.status='pending'` é obrigatório aqui: sem ele, o UPDATE varre TODOS os
-    // personagens da conta e reescreve o status de qualquer um deles — inclusive
-    // os que a staff aposentou com /permakill (`status='retired'`, ver
-    // admin-service.retireCharacter). Aprovar uma ficha nova ressuscitava o
-    // personagem morto permanentemente e apagava a consequência do permakill.
-    if (status === 'approved') {
-      await db(
-        `UPDATE characters c
-         INNER JOIN accounts a ON a.id = c.account_id
-         INNER JOIN whitelist_applications wa ON wa.account_id = a.id
-         SET c.status='approved'
-         WHERE wa.id=? AND c.status='pending'`, [req.params.id]
-      );
-    }
-
-    // Auditoria: registra quem revisou a aplicação de whitelist
-    const auditAction = status === 'approved' ? 'whitelist:approve'
-      : status === 'rejected' ? 'whitelist:reject'
-      : 'whitelist:reset';
-    await db(
-      'INSERT INTO audit_logs (action, actor_account_id, target_account_id, details) VALUES (?, ?, ?, ?)',
-      [auditAction, req.user.accountId, idRows.length > 0 ? idRows[0].account_id : null, reviewer_notes || null]
-    );
-
-    // Sincronizar com o Bot do Discord
-    if (idRows.length > 0) {
-        try {
-            await fetch(`${BOT_INTERNAL_URL}/api/sync-role`, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'X-Internal-Secret': INTERNAL_API_SECRET
-                },
-                body: JSON.stringify({ discord_id: idRows[0].discord_id, status })
-            });
-        } catch (e) {
-            console.error('[web] Falha ao notificar o Bot do Discord:', e.message);
-        }
-    }
-
-    // Log de moderacao no canal do Discord (ARCHITECTURE.md 1.3).
-    //
-    // Separado do sync de cargo de proposito, e nao um campo a mais naquela
-    // chamada: sao coisas com consequencias diferentes. O sync ALTERA o estado
-    // do usuario no Discord e a falha dele importa; este e notificacao pra staff
-    // e a falha dele nao pode desfazer nem atrasar a decisao de whitelist, que
-    // ja esta gravada no banco e no audit_logs acima.
-    //
-    // Nao e `await`ado pelo mesmo motivo.
-    notifyModerationLog({
-        kind: status === 'approved' ? 'whitelist_approve'
-            : status === 'rejected' ? 'whitelist_reject'
-            : 'whitelist_reset',
-        target: idRows.length > 0 ? `<@${idRows[0].discord_id}>` : `aplicacao #${req.params.id}`,
-        moderator: req.user.username || `conta #${req.user.accountId}`,
-        reason: reviewer_notes || null
+    await fetch(`${BOT_INTERNAL_URL}/api/sync-role`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Internal-Secret': INTERNAL_API_SECRET },
+      body: JSON.stringify({ discord_id: discordId, status })
     });
+  } catch (e) {
+    console.error('[web] Falha ao notificar o Bot do Discord:', e.message);
+  }
+}
 
-    res.json({ ok: true });
-  } catch (err) { console.error('[/api/whitelist PATCH]', err); res.status(500).json({ error: 'Erro interno do servidor' }); }
+// ── Acoes administrativas do painel ──────────────────────────────────────────
+//
+// A revisao de whitelist e a UNICA rota mutavel de staff do painel, e passou a
+// atravessar o pipeline comum (`skymp/gamemode/core/admin-action.js`): sessao,
+// permissao, validacao, alvo, estado, servico de dominio, desfecho, auditoria.
+//
+// O handler nao sumiu nem foi reescrito — ele foi movido para o `execute` da
+// acao, com o mesmo SQL e a mesma ordem. O que ele perdeu foi o proprio
+// `INSERT INTO audit_logs` (agora e o pipeline que audita, com correlationId,
+// permissao e desfecho) e o `if (idRows.length > 0)`, porque uma aplicacao
+// inexistente nao chega mais ao dominio: ela para na etapa TARGET.
+const { createWebAdminActions, resultToHttp } = require('./admin-actions');
+const webAdminActions = createWebAdminActions({
+  db, resolveStaff, notifyModerationLog, syncDiscordRole
+});
+
+app.patch('/api/whitelist/:id', requirePermission('whitelist.review'), async (req, res) => {
+  // O corpo entrega intencao, nunca identidade. `status` e as notas sao
+  // parametros; quem esta pedindo e contra quem sao resolvidos no servidor.
+  const resultado = await webAdminActions.pipeline.run({
+    action: 'whitelist.review',
+    source: 'web',
+    sourceRef: req,
+    targetRef: req.params.id,
+    reason: (req.body || {}).reviewer_notes,
+    parameters: {
+      status: (req.body || {}).status,
+      extraReviewNotes: (req.body || {}).extra_review_notes
+    },
+    // Aceito do cliente e usado SO para deduplicar e rastrear. Nunca entra em
+    // nenhuma decisao de autorizacao, e e escopado por conta dentro do pipeline.
+    correlationId: (req.body || {}).correlationId
+  });
+
+  return resultToHttp(res, resultado);
 });
 
 // ── API: Personagens ───────────────────────────────────────────────────────
-app.get('/api/characters', requireStaff, async (req, res) => {
+app.get('/api/characters', requirePermission('characters.view'), async (req, res) => {
   try {
     const search = req.query.q ? `%${req.query.q}%` : '%';
     const rows = await db(
@@ -457,25 +427,107 @@ app.get('/api/characters', requireStaff, async (req, res) => {
   } catch (err) { console.error('[/api/characters]', err); res.status(500).json({ error: 'Erro interno do servidor' }); }
 });
 
-// ── API: Audit Logs ────────────────────────────────────────────────────────
-app.get('/api/audit', requireStaff, async (req, res) => {
+// ── API: Auditoria ──────────────────────────────────────────────────────────
+//
+// Lê `audit_events`, não `audit_logs`. A diferença não é de tabela, é de
+// pergunta respondida: `audit_logs` recebe treze escritores que não gravam a
+// mesma coisa, e `rp_chat:*` grava uma linha por FALA de cada jogador — o
+// `LIMIT 200` desta rota devolvia conversa de taverna com o servidor cheio, e a
+// última ação de staff saía da tela em minutos. Ver `core/audit-event.js`.
+//
+// Onze eixos de filtro, todos indexados, todos parametrizados, e filtro
+// desconhecido é `400` em vez de ser ignorado — ignorar faria um nome errado
+// (`?staff_account_id=5`) devolver a tabela inteira parecendo resultado
+// filtrado.
+const auditSearch = require('./audit-search');
+
+app.get('/api/audit', requirePermission('audit.view', { auditGrant: true }), async (req, res) => {
+  try {
+    const { sql, params, limit, applied } = auditSearch.buildSearch(req.query);
+    const rows = await db(sql, params);
+    res.json({
+      events: rows,
+      // O cursor da próxima página. `null` quando acabou — o cliente não
+      // precisa adivinhar comparando o tamanho com o limite.
+      nextBefore: rows.length === limit ? rows[rows.length - 1].id : null,
+      applied
+    });
+  } catch (err) {
+    // Erro de filtro é do cliente e precisa dizer o quê; erro de banco é nosso
+    // e não deve vazar SQL. O construtor lança `Error` simples para o primeiro.
+    if (err instanceof Error && !/^ER_|ECONN/.test(err.code || '')) {
+      return res.status(400).json({ error: err.message });
+    }
+    console.error('[/api/audit]', err);
+    res.status(500).json({ error: 'Erro interno do servidor' });
+  }
+});
+
+/**
+ * O detalhe de um evento — o único lugar que devolve `before`, `after` e
+ * `metadata`.
+ *
+ * Eles ficam fora da listagem porque carregam até 16 KB cada, e 500 linhas com
+ * os três seriam 24 MB no navegador de quem só queria ver o que aconteceu
+ * ontem. O `soul-service` já documenta a mesma lição pelo lado da segurança:
+ * ele deixou a semente fora do `details` porque esta rota devolvia o campo
+ * inteiro para qualquer staff.
+ */
+app.get('/api/audit/event/:eventId', requirePermission('audit.view', { auditGrant: true }), async (req, res) => {
+  try {
+    const { sql, params } = auditSearch.buildSearch({ eventId: req.params.eventId, limit: 1 }, { detail: true });
+    const rows = await db(sql, params);
+    if (rows.length === 0) return res.status(404).json({ error: 'Evento não encontrado' });
+    res.json(rows[0]);
+  } catch (err) {
+    console.error('[/api/audit/event]', err);
+    res.status(500).json({ error: 'Erro interno do servidor' });
+  }
+});
+
+/**
+ * Contagem por categoria, severidade e desfecho — o resumo que uma tela de
+ * revisão de segurança abre antes de filtrar qualquer coisa.
+ */
+app.get('/api/audit/summary', requirePermission('audit.view'), async (req, res) => {
+  try {
+    const { sql, params } = auditSearch.buildSummary(req.query);
+    res.json(await db(sql, params));
+  } catch (err) {
+    if (err instanceof Error && !/^ER_|ECONN/.test(err.code || '')) {
+      return res.status(400).json({ error: err.message });
+    }
+    console.error('[/api/audit/summary]', err);
+    res.status(500).json({ error: 'Erro interno do servidor' });
+  }
+});
+
+/**
+ * O fluxo de EVENTO DE JOGO, que continua em `audit_logs`.
+ *
+ * Rota separada e nome honesto: `audit_logs` deixou de ser a auditoria e passou
+ * a ser o registro de chat, combate, morte, alma e interação. Ela existe para
+ * que a evidência de RDM que o `death-service` produz continue alcançável — e
+ * para que ninguém precise ler duas tabelas achando que lê uma.
+ *
+ * `governance.view` e não `audit.view`: são registros do mundo, não da staff.
+ */
+app.get('/api/events/gameplay', requirePermission('governance.view'), async (req, res) => {
   try {
     const rows = await db(
       `SELECT al.id, al.action, al.details, al.created_at,
               da.username as actor_name, dt.username as target_name
        FROM audit_logs al
-       LEFT JOIN accounts a1 ON a1.id = al.actor_account_id
-       LEFT JOIN discord_identities da ON da.account_id = a1.id
-       LEFT JOIN accounts a2 ON a2.id = al.target_account_id
-       LEFT JOIN discord_identities dt ON dt.account_id = a2.id
+       LEFT JOIN discord_identities da ON da.account_id = al.actor_account_id
+       LEFT JOIN discord_identities dt ON dt.account_id = al.target_account_id
        ORDER BY al.created_at DESC LIMIT 200`
     );
     res.json(rows);
-  } catch (err) { console.error('[/api/audit]', err); res.status(500).json({ error: 'Erro interno do servidor' }); }
+  } catch (err) { console.error('[/api/events/gameplay]', err); res.status(500).json({ error: 'Erro interno do servidor' }); }
 });
 
 // ── API: Economia / Holds ──────────────────────────────────────────────────
-app.get('/api/economy/holds', requireStaff, async (req, res) => {
+app.get('/api/economy/holds', requirePermission('economy.view'), async (req, res) => {
   try {
     const rows = await db(
       `SELECT h.id, h.name, h.tax_rate, h.treasury,
@@ -488,7 +540,7 @@ app.get('/api/economy/holds', requireStaff, async (req, res) => {
   } catch (err) { console.error('[/api/economy/holds]', err); res.status(500).json({ error: 'Erro interno do servidor' }); }
 });
 
-app.get('/api/economy/top-gold', requireStaff, async (req, res) => {
+app.get('/api/economy/top-gold', requirePermission('economy.view', { auditGrant: true }), async (req, res) => {
   try {
     const rows = await db(
       `SELECT c.first_name, c.last_name, c.gold, d.username
@@ -502,7 +554,7 @@ app.get('/api/economy/top-gold', requireStaff, async (req, res) => {
 });
 
 // ── API: Fichas Criminais ──────────────────────────────────────────────────
-app.get('/api/criminal', requireStaff, async (req, res) => {
+app.get('/api/criminal', requirePermission('governance.view'), async (req, res) => {
   try {
     const rows = await db(
       `SELECT cr.id, cr.crime, cr.bounty, cr.hold, cr.resolved, cr.created_at,
@@ -516,7 +568,7 @@ app.get('/api/criminal', requireStaff, async (req, res) => {
 });
 
 // ── API: Facções ───────────────────────────────────────────────────────────
-app.get('/api/factions', requireStaff, async (req, res) => {
+app.get('/api/factions', requirePermission('governance.view'), async (req, res) => {
   try {
     const rows = await db(
       `SELECT f.id, f.tag, f.name, f.treasury, f.color_hex, f.created_at,
@@ -530,7 +582,7 @@ app.get('/api/factions', requireStaff, async (req, res) => {
 });
 
 // ── API: Presos Ativos ─────────────────────────────────────────────────────
-app.get('/api/prison', requireStaff, async (req, res) => {
+app.get('/api/prison', requirePermission('governance.view'), async (req, res) => {
   try {
     const rows = await db(
       `SELECT pr.id, pr.sentence_minutes, pr.time_served_minutes, pr.crime_summary,
@@ -624,7 +676,7 @@ app.post('/api/crashes/client', async (req, res) => {
   }
 });
 
-app.get('/api/crashes', requireStaff, async (req, res) => {
+app.get('/api/crashes', requirePermission('security.view', { auditGrant: true }), async (req, res) => {
   try {
     await ensureCrashReportDir();
     const names = (await fsp.readdir(CRASH_REPORT_DIR)).filter((name) => name.endsWith('.json'));
@@ -716,6 +768,75 @@ app.get('/api/servers/:masterKey/sessions/:session', async (req, res) => {
     res.json({ user: { id: rows[0].account_id, discordId: rows[0].discord_id } });
   } catch (err) {
     console.error('[master-api] /sessions', err);
+    res.status(500).json({ error: 'Erro interno do servidor' });
+  }
+});
+
+// ── API interna: autorização para os outros processos ────────────────────────
+//
+// O bot do Discord precisava saber se alguém é staff e não tem — nem deve ter —
+// acesso ao banco. Antes disso ele respondia sozinho: `voiceChannels.js` aceitava
+// quem tivesse o cargo `STAFF_ROLE_ID` **do Discord** ou a permissão
+// `Administrator` da guild. Era uma quarta fonte de autoridade, fora do
+// `staff_roles`, e a auditoria a marcou como precedente a não repetir
+// (`docs/admin/SKYADMIN_CURRENT_STATE.md`, seção do bot).
+//
+// A correção não é dar banco ao bot: é o painel — que já é quem autentica o
+// Discord e já lê `staff_roles` — responder a pergunta. O bot passa a perguntar,
+// e a resposta vem do mesmo catálogo que decide tudo o mais.
+//
+// Ele NÃO recebe sessão nem cookie: a fronteira aqui é o `X-Internal-Secret`,
+// como em todos os outros endpoints entre processos deste projeto. O Discord ID
+// vem do corpo porque é o bot quem sabe quem clicou no comando.
+app.post('/internal/authorize', async (req, res) => {
+  const ip = req.ip || req.socket.remoteAddress || 'unknown';
+
+  if (isRateLimited(`authorize:${ip}`, 120, 60 * 1000)) {
+    return res.status(429).json({ error: 'Too many requests' });
+  }
+  if (!safeEquals(req.get('X-Internal-Secret') || '', INTERNAL_API_SECRET)) {
+    console.warn(`[authz] Tentativa nao autorizada em /internal/authorize de ${ip}`);
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+
+  const { discordId, permission } = req.body || {};
+  if (typeof discordId !== 'string' || !discordId) return res.status(400).json({ error: 'discordId ausente' });
+  if (typeof permission !== 'string' || !permission) return res.status(400).json({ error: 'permission ausente' });
+
+  try {
+    const rows = await db(
+      `SELECT a.id AS account_id, a.status AS account_status, sr.role AS role
+         FROM discord_identities di
+         INNER JOIN accounts a ON a.id = di.account_id
+         LEFT JOIN staff_roles sr ON sr.account_id = a.id
+        WHERE di.discord_id = ?
+        LIMIT 1`,
+      [discordId]
+    );
+
+    // Conta desconhecida e conta inativa negam do mesmo jeito para quem
+    // pergunta, e diferente no registro. O bot não precisa da distinção; quem
+    // for auditar depois, sim.
+    const conta = rows[0] || null;
+    const elegivel = conta && conta.account_status === 'active';
+    const decision = elegivel
+      ? authorizationCatalog.decide(conta.role, permission)
+      : { allowed: false, reason: conta ? `account_${conta.account_status}` : 'account_not_found', role: null };
+
+    if (!decision.allowed) {
+      await recordAuthzDecision('denied', {
+        accountId: conta ? conta.account_id : null,
+        permission, role: conta ? conta.role : null,
+        method: 'POST', route: '/internal/authorize', reason: decision.reason
+      });
+    }
+
+    // O cargo volta junto para o bot poder dizer "você é moderador e isso é de
+    // admin" em vez de um "não pode" sem explicação. Nunca voltam as
+    // capabilities de outra pessoa nem o account_id.
+    res.json({ allowed: decision.allowed, role: decision.allowed ? conta.role : null, reason: decision.reason || null });
+  } catch (err) {
+    console.error('[authz] /internal/authorize', err);
     res.status(500).json({ error: 'Erro interno do servidor' });
   }
 });

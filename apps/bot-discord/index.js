@@ -5,6 +5,7 @@ const express = require('express');
 const app = express();
 const voiceChannels = require('./voiceChannels');
 const moderationLog = require('./moderationLog');
+const { createStaffAuthorization } = require('./staffAuthorization');
 const { deployCommands } = require('./deploy-commands');
 
 app.use(express.json());
@@ -16,8 +17,11 @@ const client = new Client({
 const GUILD_ID = process.env.GUILD_ID;
 const WHITELIST_ROLE_ID = process.env.WHITELIST_ROLE_ID;
 const INTERNAL_API_SECRET = process.env.INTERNAL_API_SECRET;
-const STAFF_ROLE_ID = process.env.STAFF_ROLE_ID;
 const VOICE_CATEGORY_ID = process.env.VOICE_CATEGORY_ID;
+// Onde perguntar quem e staff. O bot nao le `staff_roles` — ele pergunta ao
+// painel, que consulta o catalogo unico. `STAFF_ROLE_ID` foi removido: cargo do
+// Discord nao e autoridade sobre nada. Ver staffAuthorization.js.
+const PANEL_INTERNAL_URL = process.env.PANEL_INTERNAL_URL || 'http://127.0.0.1:3001';
 // Canal de log de moderação. Sem ele o endpoint continua respondendo 202 e não
 // envia nada: quem configura o servidor decide se quer o canal, e um servidor
 // sem canal não pode ver `/permakill` falhar por causa disso.
@@ -35,6 +39,11 @@ requireEnv('DISCORD_BOT_TOKEN');
 requireEnv('GUILD_ID');
 requireEnv('WHITELIST_ROLE_ID');
 requireEnv('INTERNAL_API_SECRET');
+
+const staffAuthorization = createStaffAuthorization({
+    panelUrl: PANEL_INTERNAL_URL,
+    internalSecret: INTERNAL_API_SECRET
+});
 
 client.once('ready', async () => {
     console.log(`[discord-bot] Bot logado como ${client.user.tag}`);
@@ -59,7 +68,7 @@ client.once('ready', async () => {
 client.on('interactionCreate', async (interaction) => {
     try {
         await voiceChannels.handleInteraction(interaction, {
-            staffRoleId: STAFF_ROLE_ID,
+            authorization: staffAuthorization,
             voiceCategoryId: VOICE_CATEGORY_ID
         });
     } catch (err) {

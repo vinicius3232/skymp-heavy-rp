@@ -15,24 +15,112 @@ const { describe, it, beforeEach, afterEach } = require('node:test');
 
 const voiceChannels = require('./voiceChannels');
 
-describe('isStaffMember', () => {
-  it('permite quem tem o cargo de staff configurado', () => {
-    const member = { permissions: { has: () => false }, roles: { cache: new Map([['staff-role', true]]) } };
-    assert.strictEqual(voiceChannels.isStaffMember(member, 'staff-role'), true);
+/**
+ * ─── O que este bloco substituiu, e por quê ─────────────────────────────────
+ *
+ * Havia aqui quatro testes de `isStaffMember`, que aceitava quem tivesse o
+ * cargo `STAFF_ROLE_ID` **do Discord** ou a permissão `Administrator` da guild.
+ * Os testes estavam certos sobre o comportamento e o comportamento estava
+ * errado: era uma quarta fonte de autoridade fora de `staff_roles`, em que
+ * promover alguém no Discord dava poder que o servidor de jogo não reconhecia,
+ * e revogar no banco não tirava nada aqui.
+ *
+ * O bot agora pergunta ao painel, que consulta o catálogo único. O que estes
+ * testes medem é o portão: quem decide, e o que acontece quando não dá para
+ * perguntar.
+ */
+describe('autorização de staff — o bot não decide sozinho', () => {
+  function fakeInteraction(overrides = {}) {
+    const respostas = [];
+    return {
+      respostas,
+      isChatInputCommand: () => true,
+      commandName: 'voz-criar',
+      user: { id: '123456789' },
+      options: { getString: () => 'taverna' },
+      guild: { channels: { create: async () => ({ id: 'novo-canal', members: { size: 0 } }) } },
+      reply: async (payload) => { respostas.push(payload); },
+      ...overrides
+    };
+  }
+
+  it('pergunta ao painel pela capability voice.mute, nunca por cargo do Discord', async () => {
+    const perguntas = [];
+    const interaction = fakeInteraction();
+
+    await voiceChannels.handleInteraction(interaction, {
+      authorization: {
+        authorize: async (discordId, permission) => {
+          perguntas.push({ discordId, permission });
+          return { allowed: false, role: null, reason: 'not_granted' };
+        }
+      },
+      voiceCategoryId: 'cat-1'
+    });
+
+    assert.deepStrictEqual(perguntas, [{ discordId: '123456789', permission: 'voice.mute' }]);
+    assert.strictEqual(voiceChannels.VOICE_CHANNEL_PERMISSION, 'voice.mute');
   });
 
-  it('permite administrador mesmo sem o cargo de staff', () => {
-    const member = { permissions: { has: () => true }, roles: { cache: new Map() } };
-    assert.strictEqual(voiceChannels.isStaffMember(member, 'staff-role'), true);
+  it('nega quando o painel nega, e diz por quê sem vazar infraestrutura', async () => {
+    const interaction = fakeInteraction();
+    await voiceChannels.handleInteraction(interaction, {
+      authorization: { authorize: async () => ({ allowed: false, role: null, reason: 'not_granted' }) },
+      voiceCategoryId: 'cat-1'
+    });
+
+    assert.strictEqual(interaction.respostas.length, 1);
+    assert.match(interaction.respostas[0].content, /cargo de staff/i);
+    assert.strictEqual(interaction.respostas[0].ephemeral, true);
   });
 
-  it('bloqueia quem não é admin nem tem o cargo', () => {
-    const member = { permissions: { has: () => false }, roles: { cache: new Map() } };
-    assert.strictEqual(voiceChannels.isStaffMember(member, 'staff-role'), false);
+  it('NEGA quando o painel está fora do ar — nunca libera', async () => {
+    // A regra é o oposto da do `moderationLog`, que manda-e-esquece: ali a ação
+    // já aconteceu e o Discord é notificação. Aqui a resposta é a CONDIÇÃO para
+    // a ação acontecer. Um bot que libera quando não consegue perguntar libera
+    // todo mundo no minuto em que o painel cai.
+    const interaction = fakeInteraction();
+    let criou = false;
+    interaction.guild.channels.create = async () => { criou = true; return { id: 'x', members: { size: 0 } }; };
+
+    await voiceChannels.handleInteraction(interaction, {
+      authorization: { authorize: async () => ({ allowed: false, role: null, reason: 'panel_unreachable' }) },
+      voiceCategoryId: 'cat-1'
+    });
+
+    assert.strictEqual(criou, false, 'canal foi criado apesar de o painel estar inacessível');
+    assert.match(interaction.respostas[0].content, /não foi possível verificar/i);
   });
 
-  it('bloqueia membro nulo', () => {
-    assert.strictEqual(voiceChannels.isStaffMember(null, 'staff-role'), false);
+  it('NEGA quando o cliente de autorização nem foi injetado', async () => {
+    const interaction = fakeInteraction();
+    let criou = false;
+    interaction.guild.channels.create = async () => { criou = true; return { id: 'x', members: { size: 0 } }; };
+
+    await voiceChannels.handleInteraction(interaction, { voiceCategoryId: 'cat-1' });
+
+    assert.strictEqual(criou, false);
+    assert.strictEqual(interaction.respostas.length, 1);
+  });
+
+  it('deixa passar quando o painel autoriza', async () => {
+    const interaction = fakeInteraction();
+    let criou = false;
+    interaction.guild.channels.create = async () => { criou = true; return { id: 'x', members: { size: 0 } }; };
+
+    await voiceChannels.handleInteraction(interaction, {
+      authorization: { authorize: async () => ({ allowed: true, role: 'moderator', reason: 'granted' }) },
+      voiceCategoryId: 'cat-1'
+    });
+
+    assert.strictEqual(criou, true, 'moderator autorizado deveria conseguir criar o canal');
+  });
+
+  it('a capability exigida existe e está ativa no catálogo', () => {
+    const catalog = require('../../skymp/gamemode/core/permissions');
+    const cap = catalog.CAPABILITIES[voiceChannels.VOICE_CHANNEL_PERMISSION];
+    assert.ok(cap, 'o bot exige uma capability que o catálogo não conhece');
+    assert.strictEqual(cap.status, 'active', 'reservada nega para todo cargo, inclusive owner');
   });
 });
 
