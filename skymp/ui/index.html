@@ -777,7 +777,7 @@
         // Caminho novo: PCM cru vindo do helper nativo, já retransmitido pelo
         // servidor com o volume calculado para *este* ouvinte. Não há WebRTC
         // envolvido — só decodificar e tocar. Ver docs/technical/VOICE_NATIVE_HELPER.md.
-        playRelayFrame(msg.fromActorId, msg.volume, msg.data, msg.effect);
+        playRelayFrame(msg.fromActorId, msg.volume, msg.data, msg.effect, msg.codec);
         break;
 
       case 'peer_left':
@@ -914,7 +914,13 @@
       // Colchão de jitter deste locutor. Por chain, não global: dois locutores
       // atrás de redes diferentes não têm por que compartilhar o mesmo jitter.
       jitterS: RELAY_JITTER_MIN_S,
-      framesSinceUnderrun: 0
+      framesSinceUnderrun: 0,
+      // Opus (Fase 2 do formato do fio) — ver `ensureOpusDecoder`. `null` até
+      // o primeiro quadro `codec:"opus"` deste locutor chegar; quem nunca fala
+      // Opus nunca paga o custo de criar um `AudioDecoder`.
+      opusDecoder: null,
+      opusPending: null,
+      opusSeq: 0
     };
 
     // Sem efeito, o ganho vai direto ao panner: um nó a menos por locutor.
@@ -1015,17 +1021,107 @@
     return pcm;
   }
 
-  function playRelayFrame(fromActorId, volume, b64, effect) {
-    if (typeof b64 !== 'string' || !b64.length) return;
+  /**
+   * Converte base64 em bytes crus, sem interpretar como PCM — é o que um
+   * pacote Opus é: bytes opacos que só o `AudioDecoder` sabe ler. Distinto de
+   * `decodeRelayFrame`, que já devolve amostras normalizadas.
+   */
+  function base64ToBytes(b64) {
+    const bin = atob(b64);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    return bytes;
+  }
 
-    let pcm;
+  /**
+   * Cria (ou recria) o `AudioDecoder` Opus deste locutor, sob demanda.
+   *
+   * **Não verificado na CEF 108 real** — só num Chromium de mesa (148) antes
+   * de escrever isto, onde `{codec:'opus', sampleRate, numberOfChannels}`
+   * decodifica pacotes crus sem `description`/OpusHead nenhum. Se a CEF não
+   * tiver `AudioDecoder`, ou recusar o `configure()`, o efeito é quadros Opus
+   * descartados com aviso — nunca decodificados como ruído. Ver ADR_006.
+   *
+   * A ordem de saída do decoder tem que bater com a ordem de entrada — Opus
+   * por pacote não tem quadro-B nem dependência entre pacotes, então isso vale
+   * sempre, mas o volume/efeito de CADA quadro não viaja com a saída do
+   * `AudioDecoder` (a API não tem esse campo). `opusPending` é a fila que
+   * resolve isso: um `decode()` empilha o volume/efeito que valiam NAQUELE
+   * quadro, e o `output` desempilha na mesma ordem — sem isso, um
+   * `proximity_update` que chegasse entre o decode e o output aplicaria o
+   * volume ERRADO a um quadro que já estava em voo.
+   */
+  function ensureOpusDecoder(chain, fromActorId) {
+    if (chain.opusDecoder && chain.opusDecoder.state !== 'closed') return chain.opusDecoder;
+    if (typeof window.AudioDecoder === 'undefined') return null;
+
+    chain.opusPending = [];
+    let decoder;
     try {
-      pcm = decodeRelayFrame(b64);
+      decoder = new window.AudioDecoder({
+        output: (audioData) => {
+          const pending = chain.opusPending.shift();
+          const pcm = new Float32Array(audioData.numberOfFrames);
+          audioData.copyTo(pcm, { planeIndex: 0 });
+          audioData.close();
+          // Sem pendência correspondente não deveria acontecer — Opus por
+          // pacote produz uma saída por entrada —, mas descartar em silêncio
+          // aqui seria tocar áudio no volume/efeito de outro quadro.
+          if (!pending) return;
+          scheduleDecodedFrame(fromActorId, pending.volume, pending.effect, pcm);
+        },
+        error: (err) => {
+          state.audioStats.framesDropped++;
+          console.error('[voip] Opus: decoder entrou em erro; será recriado no próximo quadro.', err);
+        }
+      });
+      decoder.configure({ codec: 'opus', sampleRate: RELAY_SAMPLE_RATE, numberOfChannels: 1 });
+    } catch (err) {
+      console.error('[voip] Opus: CEF sem suporte a AudioDecoder("opus")?', err);
+      return null;
+    }
+    chain.opusDecoder = decoder;
+    return decoder;
+  }
+
+  function playOpusRelayFrame(fromActorId, volume, b64, effect) {
+    const chain = getRelayChain(fromActorId);
+    const decoder = ensureOpusDecoder(chain, fromActorId);
+    if (!decoder) { state.audioStats.framesDropped++; return; }
+
+    let bytes;
+    try {
+      bytes = base64ToBytes(b64);
     } catch (err) {
       state.audioStats.framesDropped++;
-      console.error('[voip] audio_frame ilegível:', err);
+      console.error('[voip] audio_frame (opus) ilegível:', err);
       return;
     }
+    if (!bytes.length) return;
+
+    chain.opusPending.push({ volume, effect });
+    chain.opusSeq += 1;
+    try {
+      decoder.decode(new window.EncodedAudioChunk({
+        type: 'key',  // todo pacote Opus decodifica sozinho — não há quadro-B pra depender
+        timestamp: chain.opusSeq * 20000,  // µs; só precisa ser crescente, não é o relógio real
+        data: bytes
+      }));
+    } catch (err) {
+      chain.opusPending.pop();
+      state.audioStats.framesDropped++;
+      console.error('[voip] Opus: decode() lançou:', err);
+    }
+  }
+
+  /**
+   * Agenda um quadro já decodificado (PCM normalizado, venha de
+   * `decodeRelayFrame` ou do `output` do `AudioDecoder`) na cadeia daquele
+   * locutor. Extraído de `playRelayFrame` para servir os dois codecs sem
+   * duplicar a lógica de jitter buffer — que não sabe nem precisa saber de
+   * onde as amostras vieram.
+   */
+  function scheduleDecodedFrame(fromActorId, volume, effect, pcm) {
     if (!pcm.length) return;
 
     const ctx = ensureAudioContext();
@@ -1107,6 +1203,31 @@
   }
 
   /**
+   * Recebe um `audio_frame` do relay e decide o codec — `codec` ausente é
+   * PCM cru (o `voice-helper` legado, ou a sonda de bancada, já em campo
+   * sem esse campo), `codec:"opus"` é a Fase 2. O servidor nunca decide isso:
+   * só repassa o que o locutor declarou (`voip-service.js relayAudioFrame`).
+   */
+  function playRelayFrame(fromActorId, volume, b64, effect, codec) {
+    if (typeof b64 !== 'string' || !b64.length) return;
+
+    if (codec === 'opus') {
+      playOpusRelayFrame(fromActorId, volume, b64, effect);
+      return;
+    }
+
+    let pcm;
+    try {
+      pcm = decodeRelayFrame(b64);
+    } catch (err) {
+      state.audioStats.framesDropped++;
+      console.error('[voip] audio_frame ilegível:', err);
+      return;
+    }
+    scheduleDecodedFrame(fromActorId, volume, effect, pcm);
+  }
+
+  /**
    * Desmonta a cadeia de áudio de um locutor.
    *
    * **Todos** os nós saem, não só o ganho. Antes desta etapa a cadeia era um
@@ -1129,6 +1250,13 @@
     try { chain.panner.disconnect(); } catch { /* idem */ }
     state.audioStats.panners--;
     state.audioStats.chains--;
+    // O `AudioDecoder` não é um AudioNode — não vaza no grafo do Web Audio,
+    // mas segura recurso nativo do lado do WebCodecs (buffers, thread de
+    // decode). `state !== 'closed'` porque fechar um decoder já fechado
+    // (por exemplo depois de um `error`) lança.
+    if (chain.opusDecoder && chain.opusDecoder.state !== 'closed') {
+      try { chain.opusDecoder.close(); } catch { /* já fechado */ }
+    }
     state.relayPeers.delete(actorId);
   }
 

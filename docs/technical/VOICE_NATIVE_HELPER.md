@@ -112,9 +112,45 @@ base64 (§4) infla 33% → **~1 Mbit/s de subida**. Na descida, o relay multipli
 pelo número de ouvintes em alcance. Isso é caro e é sabido — é aceitável para
 uma prova de conceito em rede local e **não é aceitável em produção**.
 
-**Fase 2: Opus** (`libopus`, disponível no vcpkg). A 24 kbit/s a voz fica
-transparente e o consumo cai ~30x, o que também torna irrelevante o desperdício
-do base64.
+**Fase 2: Opus — implementada em 20/08/2026.** `libopus` (vcpkg, `opus` 1.6.1),
+`OPUS_APPLICATION_VOIP`, 24 kbit/s, mesmo quadro de 960 amostras / 20ms de
+sempre — nenhum reenquadramento, porque 960 já era um dos tamanhos nativos do
+Opus a 48kHz.
+
+O formato do fio ganhou um campo: `{"type":"audio_frame", "codec":"opus", ...}`.
+`codec` ausente continua sendo PCM cru — um `voice-helper` antigo já em campo
+(como o build que um dev testou em produção em 20/08, contra `104.234.65.67`)
+não precisa saber que isto existe. O servidor não decide nem olha o codec, só
+repassa o que o locutor declarou (`relayAudioFrame` em `voip-service.js`).
+
+**O que está provado:**
+- **Fidelidade do codec, em C++ real** — `voice-helper/src/opus_roundtrip.test.cpp`
+  encoda e decoda com o mesmo `libopus` de produção: energia em 440Hz sobrevive
+  96% ao encode/decode com perda, domina o controle em 1kHz por >100x, RMS a
+  2% do teórico.
+- **A redução de banda, ponta a ponta, com microfone real** — 250 quadros que
+  eram 480.000 bytes em PCM (medido na §8.5) caíram para **9.074 bytes em
+  Opus** contra o `e2e-harness.js` de verdade: ~53x, melhor que a estimativa
+  de ~30x acima, porque parte de uma sala quieta é quase silêncio e o Opus
+  aproveita isso.
+- **A fiação do lado do ouvinte (`playOpusRelayFrame`/`ensureOpusDecoder` em
+  `skymp/ui/index.html`)** — 7 testes em `voice-audio.test.js` com um
+  `AudioDecoder` falso: reaproveita o decoder entre quadros, não cruza
+  volume/efeito de quadros diferentes quando o `output` assíncrono chega fora
+  de ordem do `proximity_update`, fecha o decoder ao remover o locutor, e
+  degrada pra "descarta, não trava" se a CEF não tiver `AudioDecoder` ou
+  recusar `configure({codec:'opus'})`.
+- **Que `AudioDecoder` decodifica Opus cru sem `description`/OpusHead** —
+  verificado à mão, `{codec:'opus', sampleRate, numberOfChannels}` bastou,
+  round-trip de encode+decode via WebCodecs com RMS batendo o esperado.
+
+**O que NÃO está provado:** o parágrafo acima rodou num Chromium de mesa
+(Electron 148), **não na CEF 108 real do client**. Se a CEF 108 não tiver
+`AudioDecoder`, ou recusar `'opus'` especificamente, o código já degrada
+("descarta, não trava" — mesmo teste que cobre CEF sem WebCodecs nenhum), mas
+ninguém exercitou isso na CEF de verdade. E continua valendo a §8.2/§8.6:
+ninguém ouviu a voz decodificada com Opus com o ouvido, muito menos comparou
+com PCM pra dizer se soa igual, pior ou melhor.
 
 ## 4. Decisão: mesma porta, mesmo ticket, JSON com base64
 

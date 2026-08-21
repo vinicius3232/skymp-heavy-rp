@@ -365,6 +365,29 @@ describe('voip-service — relay de audio_frame por proximidade', () => {
 
   });
 
+  it('repassa `codec` sem olhar dentro — Opus vai, PCM sem o campo tambem vai', async () => {
+    positions.set(SPEAKER, [0, 0, 0]);
+    positions.set(NEAR, [RANGE * 0.5, 0, 0]);
+
+    const speaker = await connectAuthed(SPEAKER);
+    const near = await connectAuthed(NEAR);
+    voip.tickProximity();
+
+    // `waitFor` cacheia o primeiro `audio_frame` recebido e devolveria ele de
+    // novo numa segunda chamada — por isso os dois quadros saem antes de olhar
+    // o que chegou, e a leitura é direto em `near.received` (mesmo padrão de
+    // `countFrames`/`far.received.filter` usado no resto deste arquivo).
+    speaker.send(JSON.stringify({ type: 'audio_frame', seq: 1, codec: 'opus', data: FRAME }));
+    speaker.send(JSON.stringify({ type: 'audio_frame', seq: 2, data: FRAME }));
+    await settle();
+
+    const frames = near.received.filter((m) => m.type === 'audio_frame');
+    assert.strictEqual(frames.length, 2);
+    assert.strictEqual(frames[0].codec, 'opus', 'o servidor nao decide o codec, so repassa o que o locutor declarou');
+    assert.strictEqual(frames[1].codec, undefined,
+      'ausencia de codec e o PCM cru legado — nao vira "null" nem um default inventado pelo servidor');
+  });
+
   it('o volume retransmitido é o mesmo que calcVolume daria para aquele par', async () => {
     const dist = RANGE * 0.25;
     positions.set(SPEAKER, [0, 0, 0]);
