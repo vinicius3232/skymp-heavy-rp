@@ -10,10 +10,16 @@ o registro.** Sem NPC, sem fila de staff, sem arbitragem automática.
   Reimplementação a partir da ideia publicada, não port
   ([pesquisa](../research/SKYMP_ECOSYSTEM_DEEP_DIVE.md) §4).
 
-> ⚠️ **PARKED.** O serviço não está registrado no `core/module-registry.js` e
-> não roda. Ele é transacional e testado, mas nunca foi visto num servidor com
-> gente dentro. Ligar é outra decisão, depois da
-> [Fase 0](../technical/FASE_0_ROTEIRO.md).
+> ✅ **ATIVO (lab), reativado em 20/08/2026.** Registrado em
+> `core/module-registry.js` como módulo `contracts`
+> (`ENABLE_CONTRACTS_SERVICE`, nasce desligado como todo `lab`). Ganhou os
+> oito comandos de chat que faltavam (`/contratocriar`, `/contratoaceitar`,
+> `/contratoentregar`, `/contratocontestar`, `/contratoacertar`,
+> `/contratocancelar`, `/contratolistar`, `/contratoinfo`) e a varredura
+> periódica de 5 min que chama `sweepExpired`/`sweepReviewed` — antes dessa
+> data existiam funções puras sem nenhuma camada de `actorId`→`characterId` e
+> sem nada chamando a varredura. Subiu no boot local sem erro; **ainda nunca
+> foi visto num servidor com gente dentro.**
 
 ---
 
@@ -178,8 +184,10 @@ não pode transformar a varredura inteira em nenhuma expiração processada.
 A chave deriva do contrato, então rodar a varredura duas vezes no mesmo minuto
 não expira duas vezes nem devolve o escrow duas vezes.
 
-**Nada agenda essas varreduras ainda.** Elas são funções; ligar o relógio é
-parte de tirar o serviço de PARKED.
+**Desde 20/08/2026, `contracts-service.initContractsService()` agenda as
+duas** (`setInterval` de 5 min, chamado pelo `initialize` do módulo
+`contracts` em `phase0-basic.js`) — mesmo padrão de
+`market-stalls-service._expirationTimer`.
 
 ---
 

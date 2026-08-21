@@ -5,10 +5,15 @@
  * move os septims e mantém o registro. Sem arbitragem automática, sem fila de
  * staff, sem NPC.
  *
- * ⚠️ PARKED: não é registrado no `core/module-registry.js` e não roda em
- * produção. Ele existe, é transacional e é testado — mas nada aqui foi visto
- * num servidor com gente dentro. Reativar é outra decisão, e depende da Fase 0
- * (`docs/technical/FASE_0_ROTEIRO.md`). Ver `PARKED_SERVICES_DECISION.md`.
+ * Registrado em `core/module-registry.js` como módulo `contracts` (fase
+ * `lab`, `ENABLE_CONTRACTS_SERVICE`, nasce desligado). Continua sem UI CEF —
+ * os comandos de chat no fim deste arquivo (`commandDefs()`) são a interface
+ * inteira — e continua sem arbitragem automática: `dispute` trava o escrow e
+ * espera decisão humana. Nada aqui foi visto num servidor com gente dentro
+ * até 20/08/2026; validar em bancada antes de tirar a flag do desligado em
+ * produção. Ver `PARKED_SERVICES_DECISION.md` para o histórico da decisão de
+ * deixar parado, e `docs/technical/FASE_0_ROTEIRO.md` para o estado geral do
+ * projeto quanto a testar em servidor real.
  *
  * Desenho: `docs/gameplay/CONTRACTS.md`
  * Decisão de economia: `docs/technical/ADR_004_ECONOMY_ACCOUNTS_AND_LEDGER.md`
@@ -45,6 +50,7 @@
 const crypto = require('crypto');
 const database = require('./database');
 const economyService = require('./core/economy-service');
+const commands = require('./commands');
 
 const MODULE = 'contracts';
 
@@ -602,9 +608,225 @@ async function history(contractId, dependencies = {}) {
   );
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Comandos de chat — a interface inteira, sem UI CEF (mesmo padrão de
+// `trade-service.commandDefs()`). Cada handler resolve `actorId` → `characterId`
+// pelo `commands.js` e gera sua própria `idempotencyKey`: um duplo clique ou um
+// reenvio de rede vira replay, nunca uma segunda transição.
+// ─────────────────────────────────────────────────────────────────────────────
+
+function _characterIdFor(actorId) {
+  const character = commands.getActiveCharacterData(actorId);
+  return character ? character.characterId : null;
+}
+
+function _notify(actorId, message) {
+  commands.sendNotification(actorId, message);
+}
+
+/** Tradução dos `code` de retorno para mensagem de jogador. */
+const _ERROR_MESSAGES = Object.freeze({
+  invalid_creator: 'Personagem não carregado.',
+  invalid_actor: 'Personagem não carregado.',
+  invalid_title: 'Título inválido (até 96 caracteres).',
+  invalid_reward: 'Recompensa inválida.',
+  invalid_category: `Categoria inválida. Use: ${CATEGORIES.join(', ')}.`,
+  invalid_description: 'Descrição inválida.',
+  invalid_idempotency_key: 'Falha interna, tente de novo.',
+  invalid_expiry: 'Prazo inválido.',
+  invalid_contract: 'Uso: informe o número do contrato.',
+  contract_not_found: 'Contrato não encontrado.',
+  invalid_status: 'Este contrato não está nesse estado agora.',
+  creator_cannot_accept: 'Você não pode aceitar o próprio contrato.',
+  not_the_worker: 'Só quem aceitou o contrato pode fazer isso.',
+  not_the_creator: 'Só o criador do contrato pode fazer isso.',
+  not_yet_expired: 'Este contrato ainda não venceu.',
+  not_expirable: 'Este contrato não pode expirar agora.',
+  review_window_open: 'A janela de revisão ainda não fechou.',
+  insufficient_funds: 'Ouro insuficiente para travar a recompensa no escrow.'
+});
+
+function _reply(actorId, result, successMessage) {
+  if (result.ok) {
+    _notify(actorId, result.replayed ? 'Ação já registrada anteriormente.' : successMessage(result));
+  } else {
+    _notify(actorId, _ERROR_MESSAGES[result.code] || `Não foi possível: ${result.code}`);
+  }
+  return result;
+}
+
+function _parseContractId(args) {
+  const id = Number.parseInt(String(args || '').trim(), 10);
+  return Number.isSafeInteger(id) && id > 0 ? id : null;
+}
+
+function commandDefs() {
+  return [
+    {
+      name: '/contratocriar',
+      description: '[Contratos] Publica um contrato, travando a recompensa no escrow',
+      usage: '/contratocriar <categoria> <recompensa> <titulo>',
+      handler: async (actorId, args) => {
+        const creatorCharacterId = _characterIdFor(actorId);
+        if (!creatorCharacterId) return _notify(actorId, 'Personagem não carregado.');
+
+        const partes = String(args || '').trim().split(/\s+/);
+        const category = partes[0];
+        const reward = Number.parseInt(partes[1], 10);
+        const title = partes.slice(2).join(' ');
+        if (!category || !title || !Number.isFinite(reward)) {
+          return _notify(actorId, 'Uso: /contratocriar <categoria> <recompensa> <titulo>');
+        }
+
+        const result = await create({ creatorCharacterId, title, category, reward, idempotencyKey: uuid() });
+        return _reply(actorId, result, r => `Contrato #${r.contractId} publicado. ${r.reward} septims travados no escrow.`);
+      }
+    },
+    {
+      name: '/contratoaceitar',
+      description: '[Contratos] Aceita um contrato aberto',
+      usage: '/contratoaceitar <id>',
+      handler: async (actorId, args) => {
+        const actorCharacterId = _characterIdFor(actorId);
+        if (!actorCharacterId) return _notify(actorId, 'Personagem não carregado.');
+        const contractId = _parseContractId(args);
+        if (!contractId) return _notify(actorId, 'Uso: /contratoaceitar <id>');
+
+        const result = await accept({ contractId, actorCharacterId, idempotencyKey: uuid() });
+        return _reply(actorId, result, () => `Contrato #${contractId} aceito.`);
+      }
+    },
+    {
+      name: '/contratoentregar',
+      description: '[Contratos] Declara a entrega de um contrato aceito',
+      usage: '/contratoentregar <id>',
+      handler: async (actorId, args) => {
+        const actorCharacterId = _characterIdFor(actorId);
+        if (!actorCharacterId) return _notify(actorId, 'Personagem não carregado.');
+        const contractId = _parseContractId(args);
+        if (!contractId) return _notify(actorId, 'Uso: /contratoentregar <id>');
+
+        const result = await deliver({ contractId, actorCharacterId, idempotencyKey: uuid() });
+        return _reply(actorId, result, () =>
+          `Entrega do contrato #${contractId} declarada. O criador tem ${Math.round(REVIEW_WINDOW_MS / 3_600_000)}h para revisar antes do acerto automático.`
+        );
+      }
+    },
+    {
+      name: '/contratocontestar',
+      description: '[Contratos] Contesta a entrega de um contrato (trava o escrow para revisão da staff)',
+      usage: '/contratocontestar <id>',
+      handler: async (actorId, args) => {
+        const actorCharacterId = _characterIdFor(actorId);
+        if (!actorCharacterId) return _notify(actorId, 'Personagem não carregado.');
+        const contractId = _parseContractId(args);
+        if (!contractId) return _notify(actorId, 'Uso: /contratocontestar <id>');
+
+        const result = await dispute({ contractId, actorCharacterId, idempotencyKey: uuid() });
+        return _reply(actorId, result, () => `Contrato #${contractId} contestado. A staff vai revisar — o escrow fica travado.`);
+      }
+    },
+    {
+      name: '/contratoacertar',
+      description: '[Contratos] Libera a recompensa entregue para o trabalhador',
+      usage: '/contratoacertar <id>',
+      handler: async (actorId, args) => {
+        const actorCharacterId = _characterIdFor(actorId);
+        if (!actorCharacterId) return _notify(actorId, 'Personagem não carregado.');
+        const contractId = _parseContractId(args);
+        if (!contractId) return _notify(actorId, 'Uso: /contratoacertar <id>');
+
+        const result = await settle({ contractId, actorCharacterId, idempotencyKey: uuid() });
+        return _reply(actorId, result, () => `Contrato #${contractId} acertado.`);
+      }
+    },
+    {
+      name: '/contratocancelar',
+      description: '[Contratos] Cancela um contrato ainda aberto e devolve o escrow',
+      usage: '/contratocancelar <id>',
+      handler: async (actorId, args) => {
+        const actorCharacterId = _characterIdFor(actorId);
+        if (!actorCharacterId) return _notify(actorId, 'Personagem não carregado.');
+        const contractId = _parseContractId(args);
+        if (!contractId) return _notify(actorId, 'Uso: /contratocancelar <id>');
+
+        const result = await cancel({ contractId, actorCharacterId, idempotencyKey: uuid() });
+        return _reply(actorId, result, () => `Contrato #${contractId} cancelado. Escrow devolvido.`);
+      }
+    },
+    {
+      name: '/contratolistar',
+      description: '[Contratos] Lista os contratos abertos',
+      usage: '/contratolistar',
+      handler: async (actorId) => {
+        const abertos = await listOpen();
+        if (abertos.length === 0) return _notify(actorId, 'Nenhum contrato aberto no momento.');
+        const linhas = abertos
+          .slice(0, 10)
+          .map(c => `#${c.id} [${c.category}] ${c.title} — ${c.reward} septims`)
+          .join(' | ');
+        return _notify(actorId, linhas);
+      }
+    },
+    {
+      name: '/contratoinfo',
+      description: '[Contratos] Mostra detalhes de um contrato',
+      usage: '/contratoinfo <id>',
+      handler: async (actorId, args) => {
+        const contractId = _parseContractId(args);
+        if (!contractId) return _notify(actorId, 'Uso: /contratoinfo <id>');
+        const contrato = await getContract(contractId);
+        if (!contrato) return _notify(actorId, 'Contrato não encontrado.');
+        return _notify(
+          actorId,
+          `#${contrato.id} [${contrato.category}] ${contrato.title} — ${contrato.reward} septims — status: ${contrato.status}`
+        );
+      }
+    }
+  ];
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Varredura periódica — expiração e acerto automático. Sem isto, `sweepExpired`
+// e `sweepReviewed` são funções que ninguém chama: um contrato vencido ficaria
+// travado até algum código externo lembrar de rodar a varredura à mão. Mesmo
+// padrão de `market-stalls-service._expirationTimer`.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const SWEEP_INTERVAL_MS = 5 * 60 * 1000;
+let _sweepTimer = null;
+
+async function _sweepTick() {
+  try {
+    const expirados = await sweepExpired();
+    const acertados = await sweepReviewed();
+    const total = expirados.processed.length + acertados.processed.length;
+    if (total > 0) {
+      console.log(`[contracts] Varredura: ${expirados.processed.length} expirados, ${acertados.processed.length} acertados automaticamente.`);
+    }
+  } catch (err) {
+    console.error('[contracts] Falha na varredura periódica:', err.message);
+  }
+}
+
+function initContractsService() {
+  if (_sweepTimer) return;
+  _sweepTimer = setInterval(_sweepTick, SWEEP_INTERVAL_MS);
+}
+
+function shutdownContractsService() {
+  if (_sweepTimer) {
+    clearInterval(_sweepTimer);
+    _sweepTimer = null;
+  }
+}
+
 module.exports = {
   create, accept, deliver, dispute, settle, cancel, expire,
   sweepExpired, sweepReviewed,
   listOpen, getContract, history,
-  STATUS, CATEGORIES, EXPIRABLE, REVIEW_WINDOW_MS
+  STATUS, CATEGORIES, EXPIRABLE, REVIEW_WINDOW_MS,
+  commandDefs, initContractsService, shutdownContractsService,
+  // Exposto só para teste.
+  SWEEP_INTERVAL_MS
 };

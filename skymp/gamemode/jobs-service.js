@@ -1,10 +1,14 @@
 /**
  * jobs-service.js
- * Coleta de recursos: lenha, minério e peixe.
+ * Coleta de recursos: lenha, minério e peixe. Trabalho livre — sem profissão
+ * fixa, qualquer personagem carregado pode fazer.
  *
- * ⚠️ PARKED: não é registrado no `core/module-registry.js` e não roda em
- * produção. A migração abaixo é de segurança interna — reativar é outra
- * decisão. Ver docs/technical/PARKED_SERVICES_DECISION.md §7.3.
+ * Registrado em `core/module-registry.js` como módulo `jobs` (fase `lab`,
+ * `ENABLE_JOBS_SERVICE`, nasce desligado). A migração para o
+ * `transaction-service` descrita abaixo — que corrigiu o defeito registrado em
+ * docs/technical/PARKED_SERVICES_DECISION.md §7.3 — foi o que tornou a
+ * reativação possível; até 20/08/2026 o arquivo existia no disco sem comando
+ * de chat nenhum. Ver §7.3 para o histórico do defeito original.
  *
  * ─── Por que este arquivo mudou ──────────────────────────────────────────────
  *
@@ -240,10 +244,40 @@ function catchFish(actorId) {
   }, 20000);
 }
 
+/**
+ * Comandos de chat — a interface inteira, sem UI CEF, no mesmo padrão de
+ * `trade-service.commandDefs()`. Não há checagem de profissão nem de rank:
+ * este é o "bico" livre, deliberadamente mais fraco que a mineração via
+ * `mining-service` (que exige a profissão `miner`).
+ */
+function commandDefs() {
+  return [
+    {
+      name: '/cortarlenha',
+      description: '[Trabalho livre] Corta lenha (precisa de Machado de Lenhador)',
+      usage: '/cortarlenha',
+      handler: (actorId) => chopWood(actorId)
+    },
+    {
+      name: '/garimpar',
+      description: '[Trabalho livre] Garimpa minério a mão (precisa de Picareta)',
+      usage: '/garimpar',
+      handler: (actorId) => mineOre(actorId)
+    },
+    {
+      name: '/pescar',
+      description: '[Trabalho livre] Pesca no rio ou lago',
+      usage: '/pescar',
+      handler: (actorId) => catchFish(actorId)
+    }
+  ];
+}
+
 module.exports = {
   chopWood,
   mineOre,
   catchFish,
+  commandDefs,
   // Exposto so pra teste: permite exercitar o bloqueio de coleta concorrente e
   // a liberacao sem depender de timer real.
   _activeGatherers: activeGatherers
