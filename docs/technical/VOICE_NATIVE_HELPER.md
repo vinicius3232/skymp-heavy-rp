@@ -449,6 +449,26 @@ que seriam código nosso para manter sem ganho nenhum sobre o que a biblioteca j
 faz. Escolha do `ixwebsocket`: API pequena e síncrona o bastante para caber num
 executável de terminal, sem arrastar Boost.
 
+### 8.5 Reverificação em 20/08/2026 — sem regressão
+
+Rodada de verificação independente, do zero (`build_verify/`, descartado depois),
+não reaproveitando nenhum binário antigo.
+
+| Verificado | Resultado |
+|---|---|
+| `vcpkg install` das três ports contra o `vcpkg.json` atual | resolve, ~700ms |
+| Link com `bcrypt` (fix da §8.3) | continua no `CMakeLists.txt`, build limpo |
+| `voice-helper.exe` roda e fala `--help`/uso | sim, e expõe um modo não documentado aqui: `--control-port` + `--pair` (pareamento com o launcher, ver `SKYVOICE_E2E_ETAPA_5.md`) |
+| `e2e-harness.js` (código de produção do `voip-service`, não mock) + `voice-helper.exe` capturando microfone real, dois atores a 300 de 1200 de alcance | `proximity_update` com `volume: 0.75` (matematicamente exato: `1 - 300/1200`), 500 quadros relayados ao `frame-probe.js --listen`, zero descarte |
+| `npm test` do gamemode | 1623/1623, incluindo `voip-service.test.js` |
+
+Nada regrediu desde a §8.3/§8.4. **O que continua exatamente igual:** ninguém
+ouviu o áudio com o ouvido — a §8.2 segue de pé, palavra por palavra, e vale
+tanto para este helper quanto para o spike de LiveKit em
+`spikes/skyvoice-livekit-cpp/` (commit `79dd5bd`), que fechou pelo mesmo
+motivo: "NINGUÉM OUVIU" como blocker #1. É julgamento humano, não medição, e
+continua sendo o único passo do roteiro que não pode ser feito por um agente.
+
 ## 9. Próxima rodada — listado, não implementado
 
 Nada abaixo foi feito neste PR.
