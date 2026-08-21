@@ -66,6 +66,8 @@ Se `mp._sp3ListMethods` não existir nesta versão do SkyMP, a linha `itemcount_
 
 ## Step 0.5 — Blocker C: o caminho CEF→servidor está vivo?
 
+**Atualização**: Blocker C (`mp.onUiEvent` morto) foi **corrigido no código** depois deste plano ter sido escrito — `core/ui-event-gateway.js` agora usa `mp.makeEventSource('_onUiEvent', ...)`, `ui/index.html` usa `window.skyrimPlatform.sendMessage(...)`. **Não validado em runtime real** (sem servidor disponível na sessão que fez a correção) — este Step 0.5 continua sendo o primeiro teste real da correção, não uma formalidade.
+
 Antes de tentar qualquer coisa sobre mineração: confirme que o servidor recebe ALGUMA coisa da CEF, testando com uma interação mais simples que já existe (ex.: abrir o painel do jogador, `/painel`, ou qualquer ação de `governance` já registrada).
 
 1. Com um cliente conectado, dispare qualquer ação que já use `interaction:query`/`interaction:execute` pela UI normal (não pelo truque do DevTools ainda).

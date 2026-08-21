@@ -1,6 +1,6 @@
 const assert = require('node:assert/strict');
 const { describe, it } = require('node:test');
-const { createUiEventGateway, installUiEventGateway } = require('./ui-event-gateway');
+const { createUiEventGateway, installUiEventGateway, NOME_DO_EVENTO, SNIPPET_DO_CLIENTE } = require('./ui-event-gateway');
 
 function setup({ valid = true, dispatch } = {}) {
   const calls = [];
@@ -57,17 +57,64 @@ describe('ui-event-gateway', () => {
     assert.ok(errors[0].join(' ').includes('chat boom'));
   });
 
-  it('atribui o callback ao mock da API mp e preserva a recusa na fronteira', () => {
-    const mp = {};
-    const { calls } = setup({ valid: false });
-    const gateway = installUiEventGateway(mp, {
-      uiEventRouter: { isValidEventEnvelope: () => false, dispatch: async () => {} },
-      handleChatInput: () => calls.push('chat'),
+  // ─────────────────────────────────────────────────────────────────────────
+  // installUiEventGateway — BOUND-004: mp.onUiEvent nunca foi chamado pelo
+  // SkyMP (docs/research/SKYMP_INTEGRATION_AUDIT.md §5). A correção troca
+  // isso por mp.makeEventSource('_onUiEvent', ...) + mp._onUiEvent.
+  // ─────────────────────────────────────────────────────────────────────────
+
+  it('registra o event source com o nome certo (precisa comecar com _) e o snippet certo', () => {
+    const mp = { makeEventSource: (nome, snippet) => { mp._registeredAs = { nome, snippet }; } };
+    installUiEventGateway(mp, {
+      uiEventRouter: { isValidEventEnvelope: () => true, dispatch: async () => {} },
+      handleChatInput: () => {},
       logger: { log: () => {}, warn: () => {}, error: () => {} }
     });
-    assert.equal(mp.onUiEvent, gateway);
-    assert.equal(mp.onUiEvent(1, null), false);
-    assert.deepEqual(calls, []);
+    assert.equal(mp._registeredAs.nome, NOME_DO_EVENTO);
+    assert.ok(NOME_DO_EVENTO.startsWith('_'), 'ActionListener::OnCustomEvent exige nome comecando com _');
+    assert.equal(mp._registeredAs.snippet, SNIPPET_DO_CLIENTE);
+    assert.ok(SNIPPET_DO_CLIENTE.includes("ctx.sp.on('browserMessage'"), 'snippet precisa escutar browserMessage, nao onUiEvent');
+  });
+
+  it('NAO atribui mais mp.onUiEvent — é exatamente o que o BOUND-004 provou morto', () => {
+    const mp = { makeEventSource: () => {} };
+    installUiEventGateway(mp, {
+      uiEventRouter: { isValidEventEnvelope: () => true, dispatch: async () => {} },
+      handleChatInput: () => {},
+      logger: { log: () => {}, warn: () => {}, error: () => {} }
+    });
+    assert.equal(mp.onUiEvent, undefined);
+  });
+
+  it('mp._onUiEvent(pcFormId, uiEvent) despacha para o gateway com args[0] como o envelope', () => {
+    const mp = { makeEventSource: () => {} };
+    const calls = [];
+    const gateway = installUiEventGateway(mp, {
+      uiEventRouter: { isValidEventEnvelope: () => true, dispatch: async () => { calls.push('dispatch'); } },
+      handleChatInput: () => {},
+      logger: { log: () => {}, warn: () => {}, error: () => {} }
+    });
+    assert.equal(typeof mp._onUiEvent, 'function');
+    const resultado = mp._onUiEvent(0xff000001, { type: 'panel:open' });
+    assert.equal(resultado, true);
+    assert.equal(resultado, gateway(0xff000001, { type: 'panel:open' }));
+  });
+
+  it('sem mp.makeEventSource (versão de SkyMP sem introspeção _sp3/event source): avisa e não lança, gateway continua utilizável diretamente', () => {
+    const mp = {};
+    const logs = [];
+    const gateway = installUiEventGateway(mp, {
+      uiEventRouter: { isValidEventEnvelope: () => true, dispatch: async () => {} },
+      handleChatInput: () => {},
+      logger: { log: () => {}, warn: (...a) => logs.push(a), error: () => {} }
+    });
+    assert.equal(mp._onUiEvent, undefined);
+    assert.ok(logs.some((l) => l.join(' ').includes('makeEventSource indisponivel')));
+    assert.equal(typeof gateway, 'function');
+  });
+
+  it('rejeita mp inválido', () => {
+    assert.throws(() => installUiEventGateway(null, {}));
   });
 
   it('interrompe o despacho quando o limitador configurado recusa o evento', () => {

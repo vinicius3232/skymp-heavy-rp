@@ -484,10 +484,25 @@
 
 <script>
   // ── Mock mp para testes fora do SkyMP ─────────────────────────────────────
+  //
+  // `mp.trigger`/`mp.events` aqui embaixo cobrem os usos client-internos e de
+  // servidor→cliente deste arquivo (voip, trade, interaction:open/close) —
+  // nenhum deles foi tocado por esta correcao e continuam sem confirmacao
+  // contra o upstream (mesma classe de suposicao nao verificada que o
+  // BOUND-004 encontrou do lado servidor→gamemode; ver
+  // docs/research/SKYMP_INTEGRATION_AUDIT.md §5). `window.skyrimPlatform`,
+  // abaixo, e o mock só do caminho que ESTA correcao resolveu: cliente→servidor
+  // (`sendUiEvent`), documentado oficialmente em
+  // docs/skyrim_platform/browser.md (upstream) como `window.skyrimPlatform.sendMessage(...)`.
   if (typeof mp === 'undefined') {
     window.mp = {
       trigger: (ev, data) => console.log('[mock] trigger:', ev, data),
       events: { add: (ev, cb) => console.log('[mock] event registered:', ev) }
+    };
+  }
+  if (typeof window.skyrimPlatform === 'undefined') {
+    window.skyrimPlatform = {
+      sendMessage: (...args) => console.log('[mock] skyrimPlatform.sendMessage:', args)
     };
   }
 
@@ -560,17 +575,22 @@
     return raw.startsWith('0x') ? raw : `0x${raw}`;
   }
 
+  // `window.mp.trigger`/`window.mp.send` nunca foram confirmados como API real
+  // da CEF do SkyMP (busca no upstream por `window.mp` só aparece no
+  // `skymp5-front`, o painel administrativo separado — não no cliente de
+  // jogo) — mesma classe de suposição não verificada que o BOUND-004
+  // encontrou do lado servidor. A correção usa o único caminho documentado
+  // oficialmente (`docs/skyrim_platform/browser.md` upstream):
+  // `window.skyrimPlatform.sendMessage(...)` dispara `browserMessage` do
+  // lado do Skyrim Platform, que `core/ui-event-gateway.js` agora escuta via
+  // `mp.makeEventSource('_onUiEvent', ...)`.
+  //
+  // UM argumento só, sempre — o `_onUiEvent` do servidor espera `args[0]`
+  // como o envelope inteiro (ver core/ui-event-gateway.js, SNIPPET_DO_CLIENTE).
   function sendUiEvent(type, data) {
-    const payload = { type, data };
-    if (!window.mp) return;
-
-    if (typeof window.mp.send === 'function') {
-      window.mp.send(type, JSON.stringify(data || {}));
-    }
-    if (typeof window.mp.trigger === 'function') {
-      window.mp.trigger(type, data || {});
-      window.mp.trigger('cef::ui:event', payload);
-    }
+    const payload = { type, data: data || {} };
+    if (!window.skyrimPlatform || typeof window.skyrimPlatform.sendMessage !== 'function') return;
+    window.skyrimPlatform.sendMessage(payload);
   }
 
   // `sendChatCommand` foi removida em 13/08/2026. Ela existia para o

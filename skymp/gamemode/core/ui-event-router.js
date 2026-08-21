@@ -2,7 +2,11 @@
  * core/ui-event-router.js
  *
  * Roteamento centralizado de eventos vindos da UI (CEF) para os módulos.
- * Substitui o hardcode de `mp.onUiEvent` chamando um único módulo.
+ * Substitui o hardcode de um handler chamando um único módulo por vez. O
+ * evento chega até aqui via `core/ui-event-gateway.js`, que recebe da CEF
+ * por `mp.makeEventSource('_onUiEvent', ...)` — não por `mp.onUiEvent`
+ * (property que o SkyMP nunca chamou; ver BOUND-004 no cabeçalho daquele
+ * arquivo e em `docs/research/SKYMP_INTEGRATION_AUDIT.md` §5).
  *
  * Cada módulo registra um prefixo (a parte do uiEvent.type antes do primeiro ':'),
  * ex: 'governance:interaction:actions' → prefixo 'governance'.
