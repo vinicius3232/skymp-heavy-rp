@@ -538,7 +538,7 @@
 
     // Contadores de custo, lidos por `window.voiceStats()`. Existem porque a
     // etapa pediu medição no cliente e ninguém mede o que não conta.
-    audioStats: { chains: 0, panners: 0, filters: 0, framesPlayed: 0, framesDropped: 0, peakChains: 0 },
+    audioStats: { chains: 0, panners: 0, filters: 0, framesPlayed: 0, framesDropped: 0, peakChains: 0, underruns: 0 },
     interaction: {
       targetActorId: null,
       sections: [],
@@ -813,7 +813,25 @@
 
   // Jitter buffer: quanto agendar à frente do relógio do AudioContext. Menos que
   // isso e qualquer atraso de rede vira um buraco audível entre quadros de 20ms.
-  const RELAY_JITTER_S = 0.06;
+  //
+  // Fixo em 60ms, este número tinha um custo medido: toda vez que a fonte
+  // atrasava, o underrun pulava para `now + 60ms`, inserindo esse silêncio de
+  // novo — mesmo se o atraso fosse de 1ms. Numa rede com jitter de verdade isso
+  // vira picotamento em vez de degradar suave (`VOICE_NATIVE_HELPER.md` §7).
+  // Por isso virou piso e teto adaptativos por locutor (`chain.jitterS`), não
+  // uma constante: cada `chain` cresce o próprio colchão quando apanha
+  // underrun e encolhe devagar quando fica um tempo sem apanhar. Ver
+  // `getRelayChain` e `playRelayFrame`.
+  const RELAY_JITTER_MIN_S = 0.06;
+  const RELAY_JITTER_MAX_S = 0.24;
+  // Cresce um quadro de 20ms por underrun — rápido o bastante para não levar
+  // vários underruns seguidos até estabilizar.
+  const RELAY_JITTER_GROW_S = 0.02;
+  // Encolhe metade de um quadro depois de uma janela sem underrun nenhum.
+  // Devagar de propósito: encolher rápido demais faria o colchão oscilar toda
+  // vez que a rede tivesse uma rajada de jitter e voltasse ao normal.
+  const RELAY_JITTER_SHRINK_S = 0.01;
+  const RELAY_JITTER_HEALTHY_FRAMES = 250; // ~5s de áudio a 20ms/quadro
 
   // Teto de fila. Se os quadros chegarem mais rápido que o tempo real (rajada
   // depois de um congestionamento), `nextPlayTime` cresce sem limite e a latência
@@ -912,7 +930,11 @@
       volume: null,
       dir: null,
       level: 0,           // RMS do último quadro — o `audioLevel` do cliente
-      activeSources: 0
+      activeSources: 0,
+      // Colchão de jitter deste locutor. Por chain, não global: dois locutores
+      // atrás de redes diferentes não têm por que compartilhar o mesmo jitter.
+      jitterS: RELAY_JITTER_MIN_S,
+      framesSinceUnderrun: 0
     };
 
     // Sem efeito, o ganho vai direto ao panner: um nó a menos por locutor.
@@ -1066,8 +1088,27 @@
     source.onended = () => { chain.activeSources--; };
 
     const now = ctx.currentTime;
-    if (chain.nextPlayTime < now || chain.nextPlayTime > now + RELAY_MAX_QUEUE_S) {
-      chain.nextPlayTime = now + RELAY_JITTER_S;
+    if (chain.nextPlayTime < now) {
+      // Underrun de verdade: a fonte atrasou e o colchão atual não segurou.
+      // Cresce o colchão deste locutor — não o de todo mundo, e não a
+      // constante global — e reagenda a partir de agora com o colchão novo.
+      chain.jitterS = Math.min(RELAY_JITTER_MAX_S, chain.jitterS + RELAY_JITTER_GROW_S);
+      chain.framesSinceUnderrun = 0;
+      chain.nextPlayTime = now + chain.jitterS;
+      state.audioStats.underruns++;
+    } else if (chain.nextPlayTime > now + RELAY_MAX_QUEUE_S) {
+      // Rajada de quadros adiantados, não underrun — não cresce o colchão por
+      // isso, só reencaixa no presente com o colchão que já tinha.
+      chain.nextPlayTime = now + chain.jitterS;
+    } else {
+      // Quadro chegou dentro do colchão: mais uma prova de que o colchão atual
+      // é suficiente. `RELAY_JITTER_HEALTHY_FRAMES` seguidos sem underrun
+      // encolhe um pouco — devagar, pra não oscilar a cada rajada isolada.
+      chain.framesSinceUnderrun++;
+      if (chain.framesSinceUnderrun >= RELAY_JITTER_HEALTHY_FRAMES) {
+        chain.jitterS = Math.max(RELAY_JITTER_MIN_S, chain.jitterS - RELAY_JITTER_SHRINK_S);
+        chain.framesSinceUnderrun = 0;
+      }
     }
     source.start(chain.nextPlayTime);
     chain.nextPlayTime += buffer.duration;
@@ -1137,6 +1178,7 @@
       fontesTocando: sources,
       quadrosTocados: state.audioStats.framesPlayed,
       quadrosDescartados: state.audioStats.framesDropped,
+      underruns: state.audioStats.underruns,
       peersWebRTC: state.peers.size,
       // `performance.memory` é não-padrão e só existe em Chromium. Está aqui
       // com guarda porque é a ÚNICA leitura de memória que a CEF dá de graça.
