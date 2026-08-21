@@ -27,6 +27,8 @@
  */
 
 const assert = require('assert');
+const fs = require('fs');
+const path = require('path');
 const { describe, it, beforeEach, after } = require('node:test');
 
 const COMPRADOR_ACTOR = 0xff00e001;
@@ -444,6 +446,47 @@ describe('crafting-service — consumo e entrega numa transação só', () => {
     const paraOJogador = notificacoes.map(n => n.message).join(' ');
     assert.strictEqual(/Unknown column/.test(paraOJogador), false, 'nome de coluna não pode vazar pro jogador');
   });
+
+  describe('gate de profissão (migration-v20)', () => {
+    beforeEach(() => {
+      // Sobrescreve a receita do beforeEach externo com uma presa a profissão —
+      // o mesmo recipeId (9), só que agora exigindo `blacksmith`.
+      tabelas['FROM crafting_recipes WHERE id'] = [
+        { id: 9, name: 'Poção de Cura', result_base_id: RESULTADO, result_count: 2, required_profession: 'blacksmith', required_rank: null }
+      ];
+    });
+
+    it('recusa quem não tem a profissão exigida — e não consome nada', async () => {
+      tabelas['FROM character_professions WHERE character_id'] = []; // sem linha = sem profissão
+
+      const ok = await crafting.craftItem(COMPRADOR_ACTOR, COMPRADOR_CHAR, 9);
+
+      assert.strictEqual(ok, false);
+      assert.strictEqual(ledgerItem.length, 0, 'a checagem de profissão precisa vir ANTES de consumir ingrediente');
+      assert.strictEqual(inventario[chaveInv(COMPRADOR_CHAR, INGREDIENTE_A)], 5, 'ingrediente intacto');
+    });
+
+    it('libera quem tem a profissão ativa', async () => {
+      tabelas['FROM character_professions WHERE character_id'] = [
+        { character_id: COMPRADOR_CHAR, profession_code: 'blacksmith', status: 'active', rank: 1, xp: 0 }
+      ];
+
+      const ok = await crafting.craftItem(COMPRADOR_ACTOR, COMPRADOR_CHAR, 9);
+
+      assert.strictEqual(ok, true);
+      assert.strictEqual(inventario[chaveInv(COMPRADOR_CHAR, RESULTADO)], 2, 'craft completou e entregou o resultado');
+    });
+
+    it('receita sem required_profession continua livre (regressão)', async () => {
+      tabelas['FROM crafting_recipes WHERE id'] = [
+        { id: 9, name: 'Poção de Cura', result_base_id: RESULTADO, result_count: 2 } // sem o campo, como antes desta migration
+      ];
+
+      const ok = await crafting.craftItem(COMPRADOR_ACTOR, COMPRADOR_CHAR, 9);
+
+      assert.strictEqual(ok, true, 'NULL/ausente continua sem gate nenhum');
+    });
+  });
 });
 
 describe('jobs-service — coleta com rastro no banco', () => {
@@ -531,4 +574,18 @@ describe('jobs-service — coleta com rastro no banco', () => {
     assert.strictEqual(itensAplicadosNoCliente.length, 0);
     assert.strictEqual(jobs._activeGatherers.has(COMPRADOR_CHAR), false, 'o ocupado sai mesmo assim');
   });
+});
+
+describe('a migration-v20 declara toda coluna que o gate de profissão do crafting usa', () => {
+  const sql = fs.readFileSync(
+    path.resolve(__dirname, '..', 'packages', 'database', 'migration-v20-crafting-profession-gate.sql'),
+    'utf8'
+  );
+  const alteracao = sql.slice(sql.indexOf('ALTER TABLE'));
+
+  for (const coluna of ['required_profession', 'required_rank']) {
+    it(`declara a coluna '${coluna}'`, () => {
+      assert.ok(alteracao.includes(`\`${coluna}\``), `coluna '${coluna}' usada em crafting-service.js mas ausente da migration-v20`);
+    });
+  }
 });

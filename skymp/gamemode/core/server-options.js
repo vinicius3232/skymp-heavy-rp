@@ -73,6 +73,8 @@ const SPEC = {
   // veio, sem exigir pixel-perfect. Ver docs/gameplay/MINING.md §1.
   'mining.maxDistance': { ...num(50, 1000), default: 200, usedBy: 'mining-service.js (registerMiningInteractions)' },
 
+  'crafting.xpPerCraft': { ...num(0, 1000), default: 2, usedBy: 'crafting-service.js (craftItem)' },
+
   // ── Voz: como o estado do personagem muda a voz ────────────────────────────
   //
   // Nenhum destes números está escrito na `VoicePolicyEngine`. Ela lê daqui, e
