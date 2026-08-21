@@ -16,74 +16,34 @@ const moderationLog = require('./core/moderation-log');
 const { sharedVoiceStaffMute: voiceStaffMute } = require('./core/voice/voice-staff-mute');
 const { actorRef } = require('./core/papyrus');
 const skymp = require('./core/skymp-adapter');
+// O catálogo. Este arquivo deixou de ser o dono da tabela cargo→permissão e
+// passou a ser um consumidor dela, como o painel e o bot. Ver core/permissions.js.
+const permissions = require('./core/permissions');
 
-// Roles e permissões por nível
+// ─── Onde foi parar a tabela que morava aqui ─────────────────────────────────
 //
-// `manage_recipes` existe separada de `add_item` de propósito. `add_item` é um
-// ato pontual e auditado — "dê este item a este jogador", raio de alcance de uma
-// pessoa. Uma receita é uma regra permanente que **todo** jogador usa, quantas
-// vezes quiser: é uma casa da moeda, não um presente. Reaproveitar `add_item`
-// para receita faria quem auditasse "quem pode add_item?" receber a resposta
-// errada sobre quem pode reformar a economia de crafting — que é a mesma classe
-// do nível numérico que esta tabela já pagou caro para eliminar: uma permissão
-// que significa outra coisa que não o que o nome diz.
+// `ROLE_PERMISSIONS` vivia neste arquivo, e por isso o painel web não conseguia
+// consultá-la: ele lia a mesma linha de `staff_roles` e respondia "tem cargo?
+// libera tudo". A granularidade existia do lado que ninguém consegue usar hoje.
 //
-// `reveal_identity` (07/08/2026) nasce pelo mesmo critério e contra o mesmo
-// candidato fácil. O óbvio seria pendurar a revelação de identidade em
-// `view_audit` — "staff lendo registro" —, e é errado por duas razões
-// independentes: `view_audit` significa ler o que a STAFF fez, não furar o
-// anonimato de um JOGADOR, então quem auditasse "quem pode view_audit?"
-// receberia a resposta errada sobre quem pode desmascarar; e `view_audit` é de
-// moderador, então reaproveitá-la alargaria o poder para a linha de frente
-// inteira sem que ninguém tivesse decidido isso.
+// A tabela agora é `core/permissions.js`, e a justificativa longa de cada
+// decisão de cargo — por que `manage_recipes` não é `add_item`, por que
+// `reveal_identity` não é `view_audit`, por que `voice_mute` é de moderador e
+// `run_world_probe` não é — foi junto com ela, porque é lá que ela ajuda quem
+// for mexer em quem pode o quê.
 //
-// Fica em `admin`/`owner`, fora do moderador, pelo mesmo andar de `add_item`,
-// `set_gold` e `retire_character`. O argumento não é o de patrimônio da §7.4 —
-// revelar não move nada. É que **nenhuma outra ação de staff é irreversível do
-// jeito que esta é**: um kick acaba quando a pessoa reconecta, ouro dado volta
-// por outro `/setgold`, e até o `/permakill` é soft-delete. Uma identidade
-// revelada não desrevela — ela passa a morar na cabeça de quem leu, e o
-// `audit_logs` registra que aconteceu sem poder desfazer. O valor do sistema de
-// anonimato é inversamente proporcional a quantas pessoas conseguem contorná-lo,
-// e moderador é o cargo mais numeroso e menos filtrado.
-//
-// O que fica em aberto, no formato da PARKED_SERVICES_DECISION.md §7.4: se a
-// operação real mostrar que denúncia de metagaming chega mais rápido do que
-// admin responde, a resposta NÃO é dar `reveal_identity` ao moderador — é
-// desenhar uma variante com escopo (revelar só quem é parte de uma denúncia
-// aberta). Alargar o cargo resolveria a fila criando o problema que a permissão
-// existe para evitar.
-//
-// `run_world_probe` (08/08/2026) cobre os instrumentos de observação da Fase 0 —
-// `/censofauna` e `/sondacadaver`, as Peças 1 e 2 da §16 do
-// `HOSTILE_MOB_ACTIVATION_DECISION.md`. Nasce pelo mesmo critério das duas
-// acima, e contra o mesmo candidato fácil.
-//
-// O óbvio seria `view_audit` — "staff olhando o servidor" —, e é errado pela
-// razão de sempre: `view_audit` significa ler o que a STAFF fez, não vasculhar o
-// mundo nem escrever no inventário de um ator. Quem auditasse "quem pode
-// view_audit?" receberia a resposta errada sobre quem pode esvaziar um cadáver.
-//
-// Fica fora do moderador porque uma das duas ferramentas **escreve**: a sonda
-// esvazia o inventário do ator alvo para provar que a escrita funciona, e
-// restaura em seguida. A restauração pode falhar. O censo, sozinho, seria
-// inofensivo o bastante para moderador — mas separar em duas permissões daria a
-// este projeto uma permissão a mais para justificar sem que ninguém tivesse
-// pedido, e as duas ferramentas rodam na mesma sessão, pela mesma pessoa.
-//
-// `voice_mute` fica no MODERADOR, ao lado de `kick`. É a ferramenta de quem
-// modera uma cena: silenciar quem está gritando por cima de todo mundo é
-// menos grave que expulsar, e exigir um admin para isso faria a moderação
-// escolher entre não fazer nada e expulsar. Ela não escreve no mundo nem no
-// banco — o silêncio vive em memória (ver core/voice/voice-staff-mute.js).
-const ROLE_PERMISSIONS = {
-  moderator: ['kick', 'teleport', 'view_audit', 'manage_whitelist', 'voice_mute'],
-  admin:     ['kick', 'teleport', 'view_audit', 'manage_whitelist', 'ban', 'add_item', 'set_gold', 'retire_character', 'manage_recipes', 'reveal_identity', 'run_world_probe', 'voice_mute'],
-  owner:     ['kick', 'teleport', 'view_audit', 'manage_whitelist', 'ban', 'add_item', 'set_gold', 'manage_staff', 'retire_character', 'manage_recipes', 'reveal_identity', 'run_world_probe', 'voice_mute']
-};
+// O que ficou aqui é o que sempre foi deste arquivo: o cache por `actorId`, o
+// ciclo de vida dele (login/logout) e os comandos.
 
-// Cache em memória: actorId → { role, permissions: Set<string> }
-// Carregado na whitelist a partir da tabela staff_roles (não de vip_level)
+// Cache em memória: actorId → { role }
+//
+// Guarda o CARGO CRU, não o conjunto de permissões resolvido. A diferença
+// importa: resolver no login congelaria a decisão no momento em que o jogador
+// entrou, e quem editasse o catálogo passaria a ter um servidor onde metade da
+// staff opera pela tabela velha até desconectar. Resolver na pergunta custa uma
+// busca em array de vinte itens e não tem esse modo de falha.
+//
+// Carregado da tabela `staff_roles` — nunca de `vip_level`.
 const staffCache = new Map();
 
 /**
@@ -106,9 +66,27 @@ async function registerStaffRole(actorId, accountId) {
     }
 
     const role = rows[0].role;
-    const permissions = new Set(ROLE_PERMISSIONS[role] || []);
-    staffCache.set(actorId, { role, permissions });
-    console.log(`[admin] Actor ${actorId.toString(16)} registrado como staff (role: ${role}, permissões: ${[...permissions].join(', ')})`);
+    staffCache.set(actorId, { role });
+
+    // Cargo que o catálogo não conhece grita, e grita aqui — no login, uma vez,
+    // e não a cada comando negado.
+    //
+    // Antes ele passava em silêncio: `ROLE_PERMISSIONS[role] || []` virava um
+    // `Set` vazio e a pessoa entrava com um cargo que negava tudo sem que nada
+    // dissesse por quê. Do outro lado do muro o painel fazia `rows.length !== 0`
+    // e liberava tudo — o mesmo `role='support'` produzia acesso total à web e
+    // zero em jogo, e nenhum dos dois lados reclamava. Ver
+    // `docs/admin/SKYADMIN_CURRENT_STATE.md` §4.2.
+    const concedidas = permissions.capabilitiesForRole(role);
+    if (concedidas.length === 0) {
+      console.error(
+        `[admin] Actor ${actorId.toString(16)} tem cargo '${role}' em staff_roles, e o catálogo NAO conhece esse cargo. ` +
+        `Ele nega tudo, em jogo e no painel. Cargos válidos: ${permissions.ROLES.join(', ')}. ` +
+        `Ver core/permissions.js.`
+      );
+      return;
+    }
+    console.log(`[admin] Actor ${actorId.toString(16)} registrado como staff (role: ${role}, ${concedidas.length} permissões: ${concedidas.join(', ')})`);
   } catch (err) {
     console.error(`[admin] Erro ao carregar cargo de staff para account ${accountId}:`, err.message);
   }
@@ -122,49 +100,70 @@ function removeStaffRole(actorId) {
   staffCache.delete(actorId);
 }
 
-/** Toda permissão que existe, derivada dos cargos. Fonte da validação abaixo. */
-const KNOWN_PERMISSIONS = new Set(Object.values(ROLE_PERMISSIONS).flat());
-
 /**
  * Verifica se um ator tem uma permissão específica.
  *
+ * A assinatura não mudou, e os nomes antigos continuam valendo: `kick`,
+ * `set_gold` e os outros onze são traduzidos por `LEGACY_ALIASES` antes de
+ * qualquer validação. Nenhum sítio de chamada precisou mudar — inclusive os dos
+ * módulos PARKED, que ninguém está olhando e que já foram, uma vez, onde um bug
+ * de permissão sobreviveu a uma suíte inteira.
+ *
  * @param {number} actorId
- * @param {string} permission - 'kick', 'ban', 'teleport', 'add_item', 'set_gold', etc.
+ * @param {string} permission  `players.kick`, `economy.adjust`, … ou o nome legado
  * @returns {boolean}
  *
- * Sobre a validação do argumento: doze chamadas nos módulos PARKED passam um
- * NÚMERO (`hasPermission(actorId, 20)`), herança de um modelo antigo de níveis
- * de staff. Como `permissions` é um `Set` de strings, `Set.has(20)` é sempre
- * `false` — a checagem "funcionava" no sentido de nunca explodir, e negava
- * tudo em silêncio.
+ * Sobre gritar em vez de negar calado: doze chamadas nos módulos PARKED passavam
+ * um NÚMERO (`hasPermission(actorId, 20)`), herança de um modelo de níveis que
+ * não existe mais — e negavam tudo em silêncio, inclusive para `owner`. O caso
+ * oposto é igualmente perigoso: quem escreve `hasPermission(actorId,
+ * 'manage_factions')` acha que criou uma regra e criou uma porta que nunca abre.
  *
- * Um nome de permissão que não existe é igualmente perigoso na direção
- * oposta: quem escreve `hasPermission(actorId, 'manage_factions')` acha que
- * criou uma regra, e criou uma porta que nunca abre.
+ * Agora há um terceiro caso, e ele é o mais fácil de ler errado: uma permissão
+ * **reservada** (`players.ban`, `inventory.remove`, …). O nome existe no
+ * catálogo, o poder não — então ela nega para todo mundo, `owner` incluído, e o
+ * log diz exatamente isso em vez de deixar parecer falta de cargo.
  *
- * Nos dois casos preferimos gritar no log a negar caladamente. Não lançamos
- * exceção porque isso derrubaria o comando do jogador por um erro de
- * programação — negar é o resultado seguro, o log é o que faz alguém corrigir.
+ * Não lançamos exceção em nenhum dos casos: isso derrubaria o comando do jogador
+ * por um erro de programação. Negar é o resultado seguro; o log é o que faz
+ * alguém corrigir.
  */
 function hasPermission(actorId, permission) {
-  if (typeof permission !== 'string') {
-    console.error(
-      `[admin] hasPermission recebeu ${typeof permission} (${JSON.stringify(permission)}) em vez de um nome de permissão. ` +
-      `Provavelmente um nível numérico legado — use um destes: ${[...KNOWN_PERMISSIONS].join(', ')}. Negando.`
-    );
-    return false;
-  }
-  if (!KNOWN_PERMISSIONS.has(permission)) {
-    console.error(
-      `[admin] hasPermission recebeu a permissão desconhecida '${permission}'. ` +
-      `Nenhum cargo a concede, então isso nega sempre. Conhecidas: ${[...KNOWN_PERMISSIONS].join(', ')}.`
-    );
-    return false;
+  const staff = staffCache.get(actorId);
+  const decisao = permissions.decide(staff ? staff.role : null, permission);
+
+  // Erro de programação — nome errado, forma errada, ou porta que ainda não
+  // existe — é barulho. Falta de cargo e cargo sem a permissão são operação
+  // normal e ficam quietos: eles acontecem toda vez que um jogador comum digita
+  // um comando de staff, e um log por tentativa viraria ruído que se aprende a
+  // ignorar. Quem precisa vê-los é o `audit_logs`, e é o painel que os grava.
+  /** @type {string[]} */
+  const barulhentos = [
+    permissions.DENIAL.MALFORMED_PERMISSION,
+    permissions.DENIAL.UNKNOWN_PERMISSION,
+    permissions.DENIAL.RESERVED_PERMISSION,
+    permissions.DENIAL.UNKNOWN_ROLE
+  ];
+  if (!decisao.allowed && barulhentos.includes(decisao.reason)) {
+    console.error(`[admin] hasPermission negou: ${permissions.explain(decisao)}.`);
   }
 
+  return decisao.allowed;
+}
+
+/**
+ * A decisão completa, com o motivo. Existe para quem precisa **auditar** a
+ * negação — hoje o painel, amanhã qualquer superfície de `security.review`.
+ *
+ * O gamemode continua usando o booleano: um comando de chat negado responde ao
+ * jogador e não tem para onde levar o motivo.
+ *
+ * @param {number} actorId
+ * @param {string} permission
+ */
+function checkPermission(actorId, permission) {
   const staff = staffCache.get(actorId);
-  if (!staff) return false;
-  return staff.permissions.has(permission);
+  return permissions.decide(staff ? staff.role : null, permission);
 }
 
 /**
@@ -193,10 +192,19 @@ async function auditLog(actorAccountId, targetAccountId, action, details) {
 
 /**
  * /anim [actorId] [animName] - Reproduz animação em ator (para eventos RP)
- * Permissão: 'teleport' (nível moderador+)
+ * Permissão: `players.animate` (moderador+).
+ *
+ * Era `teleport`, e essa é a correção mais silenciosa deste commit: uma
+ * permissão que significava outra coisa que não o que o nome diz — exatamente o
+ * defeito que o catálogo gasta parágrafos argumentando contra em `economy.recipes`
+ * e `identity.reveal`. Quem auditasse "quem pode teleportar?" recebia a resposta
+ * errada sobre quem pode fazer um personagem se mexer sozinho.
+ *
+ * Ninguém perdeu poder: os dois cargos que tinham `teleport` receberam as duas
+ * capabilities. O que mudou é que a pergunta passou a ter resposta própria.
  */
 async function playAnimation(actorId, targetActorId, animName) {
-  if (!hasPermission(actorId, 'teleport')) {
+  if (!hasPermission(actorId, 'players.animate')) {
     sendDenied(actorId);
     return;
   }
@@ -832,6 +840,7 @@ module.exports = {
   registerStaffRole,
   removeStaffRole,
   hasPermission,
+  checkPermission,
   getRole,
   auditLog,
   playAnimation,

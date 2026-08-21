@@ -1,6 +1,11 @@
 # RBAC administrativo
 
-**Status:** desenho aceito, implementação não iniciada
+**Status:** parcialmente implementado (15/08/2026). O catálogo capability-based, os
+cargos, o `requirePermission` do painel e as quatro negações **existem e são testados** —
+ver [`AUTHORIZATION_MATRIX.md`](AUTHORIZATION_MATRIX.md) para o que roda. O que este
+documento descreve e ainda **não** existe: o mapa cargo→permissão em TABELA (hoje é
+`skymp/gamemode/core/permissions.js`), overrides por pessoa, cargo temporário e os seis
+cargos (hoje são três).
 **Decisão formal:** [ADR 005](../technical/ADR_005_ADMIN_RBAC.md)
 **Evidência:** [`ADMIN_PLATFORM_AUDIT.md`](../research/ADMIN_PLATFORM_AUDIT.md) §4.1–§4.6
 **Regra que não muda:** `vip_level` é monetização. Nunca foi e nunca será critério de permissão.
@@ -107,8 +112,12 @@ chamador é a UI.
 | `logs.view` | 🟢 | auditoria administrativa | jogo: `view_audit` (declarada, **nada verifica**) |
 | `logs.view.security` | 🔴 | eventos sensíveis: revelação de identidade, mudança de cargo, negações | ❌ |
 
-`logs.view.security` é escopo separado por um motivo concreto: o `audit_logs`
-mistura `identity:staff_reveal` com `staff:teleport`. Quem pode ver movimentação
+`logs.view.security` é escopo separado por um motivo concreto: até 15/08/2026 o
+`audit_logs` misturava `identity:staff_reveal` com `staff:teleport` na mesma
+pilha, sem nada que os separasse numa consulta. Hoje `audit_events` tem
+`severity` — e revelação de identidade é `critical` enquanto teleporte é `info`
+—, então o escopo deixou de depender de uma coluna que não existia; o argumento
+abaixo, porém, continua de pé. Quem pode ver movimentação
 rotineira não deveria ver, de graça, a lista de quem foi desmascarado — o
 `admin-service.js` gastou trinta linhas argumentando que revelar identidade é a
 única ação de staff sem volta, e deixar o **rastro** dela aberto a todo cargo
@@ -311,8 +320,10 @@ Obrigações, todas verificáveis por teste:
 4. Permissão fora do catálogo → `500` **no boot da rota**, não em runtime. Uma
    rota registrada com permissão inexistente é bug de programação e deve impedir
    o servidor de subir, não negar silenciosamente em produção.
-5. Toda negação grava `audit_logs` com `outcome='denied'`, a permissão pedida e o
-   `request_id`. É o sinal de sondagem que hoje não existe.
+5. ~~Toda negação grava `audit_logs`~~ ✅ **feito em 15/08/2026, em `audit_events`:**
+   toda negação grava com `outcome='denied'`, `severity` elevada, a permissão
+   pedida e o `correlationId`. O sinal de sondagem passou a existir e é uma
+   consulta de um filtro (`?outcome=denied`), não uma leitura de texto livre.
 6. Cache de permissões por sessão com TTL curto (≤ 60 s) **e** invalidação
    imediata em qualquer escrita de `staff_roles`/overrides. Revogação que demora
    um TTL para valer é aceitável para concessão; para revogação, não.

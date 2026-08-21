@@ -278,7 +278,15 @@ describe('nenhum nivel numerico sobrou no gamemode', () => {
 
         const conteudo = fs.readFileSync(alvo, 'utf8');
         for (const [i, linha] of conteudo.split('\n').entries()) {
-          if (linha.trimStart().startsWith('*')) continue; // comentário de bloco
+          const inicio = linha.trimStart();
+          if (inicio.startsWith('*')) continue;  // continuação de comentário de bloco
+          // ...e comentário de linha, pelo mesmo motivo. O que este guard caça é
+          // SÍTIO DE CHAMADA, e prosa não executa: `core/permissions.js` explica
+          // a classe de bug citando `hasPermission(actorId, 20)` textualmente, e
+          // ser reprovado por documentar o defeito que se está consertando é o
+          // tipo de falso positivo que faz alguém afrouxar o guard inteiro.
+          // Comentário no FIM de uma linha de código continua sendo varrido.
+          if (inicio.startsWith('//')) continue;
           if (numerico.test(linha)) {
             encontrados.push(`${path.relative(raiz, alvo)}:${i + 1}`);
           }

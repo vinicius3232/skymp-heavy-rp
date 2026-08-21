@@ -42,7 +42,7 @@ planejar: ela diz o que precisa existir antes.
 | **World** | censo de fauna, sonda de cadáver, zonas seguras | RBAC + **ponte de jogo** |
 | **Server** | manutenção, anúncio, capacidade, fila | RBAC + **ponte de jogo** |
 | **Modules** | estado dos módulos do registry | RBAC + **ponte de jogo** |
-| **Logs** | auditoria com filtro; aba de segurança separada | RBAC + `audit_logs` v2 |
+| **Logs** | auditoria com filtro; aba de segurança separada | RBAC + `audit_events` ✅ |
 | **Developer** | health, versões, manifesto, drift de schema, crash reports | RBAC |
 
 Três módulos — World, Server, Modules — dependem de uma peça que **não existe**:
@@ -79,7 +79,7 @@ Navegador
         ├─ 4. idempotência      → repetição devolve o mesmo resultado
         └─► Service (transação única)
               ├─ muta o domínio
-              ├─ grava audit_logs (antes/depois, permissão, request_id)
+              ├─ grava audit_events (antes/depois, permissão, correlationId)
               └─ enfileira efeito externo, quando houver
                     └─► Servidor de jogo, via canal autenticado   [FASE 4]
 ```
