@@ -66,11 +66,28 @@ async function fakeQuery(sql, params = []) {
       .map(({ id, base_id, pos_x, pos_y, pos_z, angle_z }) => ({ id, base_id, pos_x, pos_y, pos_z, angle_z }));
   }
 
+  if (/^UPDATE world_objects SET state = 'looted' WHERE id = \? AND state = 'active'/i.test(normalized)) {
+    const [id] = params;
+    const row = worldObjects.find((r) => r.id === id && r.state === 'active');
+    if (row) row.state = 'looted';
+    return { affectedRows: row ? 1 : 0 };
+  }
+
+  if (/^SELECT base_id FROM world_objects WHERE id = \?/i.test(normalized)) {
+    const [id] = params;
+    const row = worldObjects.find((r) => r.id === id);
+    return row ? [{ base_id: row.base_id }] : [];
+  }
+
   if (/^UPDATE world_objects SET ref_desc/i.test(normalized)) {
     const [refDesc, id] = params;
     const row = worldObjects.find((r) => r.id === id);
     if (row) row.ref_desc = refDesc;
     return { affectedRows: row ? 1 : 0 };
+  }
+
+  if (/^SELECT id FROM world_objects WHERE state = 'active' AND expires_at/i.test(normalized)) {
+    return worldObjects.filter((r) => r.state === 'active' && r.expires_at !== null && isExpired(r)).map((r) => ({ id: r.id }));
   }
 
   if (/^DELETE FROM world_objects WHERE state = 'active' AND expires_at/i.test(normalized)) {
@@ -120,6 +137,7 @@ Module._load = function (request, parent, isMain) {
 };
 
 const cellPersistence = require('./cell-persistence-service');
+const interactionRegistry = require('./core/interaction-registry');
 
 after(() => {
   Module._load = originalLoad;
@@ -131,6 +149,7 @@ const CELULA_B = '1a2b:Skyrim.esm';
 const ATOR = 0xff00c001;
 
 let placeAtMeCalls = [];
+let despawnCalls = [];
 
 function resetar() {
   resetFakeDb();
@@ -139,7 +158,9 @@ function resetar() {
   removeItemImpl = async () => true;
   giveItemCalls = [];
   placeAtMeCalls = [];
+  despawnCalls = [];
   cellPersistence._resetInMemoryCaches();
+  try { interactionRegistry._reset(); } catch { /* alguns testes reidratam o registry sozinhos */ }
 
   let nextRefId = 0x100;
   global.mp = {
@@ -153,6 +174,10 @@ function resetar() {
         placeAtMeCalls.push({ self, args });
         const refId = nextRefId++;
         return { type: 'form', desc: `${refId.toString(16)}:Skyrim.esm` };
+      }
+      if (cls === 'ObjectReference' && (fn === 'Disable' || fn === 'Delete')) {
+        despawnCalls.push({ fn, self });
+        return null;
       }
       return null;
     }
@@ -486,5 +511,188 @@ describe('cell-persistence — estresse: 100 itens numa celula', () => {
     await cellPersistence.rehydrateCell(CELULA_A, ATOR);
 
     assert.equal(worldObjects.length, linhasAntes, 'reidratar nao deveria criar linha nenhuma em world_objects');
+  });
+});
+
+describe('cell-persistence — removeObject (pickup, Tarefa 5)', () => {
+  beforeEach(resetar);
+
+  async function dropar() {
+    atoresAtivos = [ATOR];
+    posicoes[ATOR] = { pos: [10, 20, 30], cellOrWorldDesc: CELULA_A };
+    const resultado = await cellPersistence.recordDrop({
+      actorId: ATOR, characterId: 901, baseId: 0xf, count: 1, category: 'weapon', value: 0
+    });
+    giveItemCalls = []; // limpa o giveItem que o proprio recordDrop nao chama (ele so remove) — deixa limpo pro pickup
+    return resultado.id;
+  }
+
+  it('pega um item ativo: marca looted, da o item, despawna a referencia', async () => {
+    const id = await dropar();
+    assert.ok(cellPersistence._activeObjectsById.has(id));
+
+    const resultado = await cellPersistence.removeObject(id, ATOR, 901);
+    assert.deepEqual(resultado, { ok: true });
+
+    assert.equal(worldObjects.find((r) => r.id === id).state, 'looted');
+    assert.equal(giveItemCalls.length, 1);
+    assert.equal(giveItemCalls[0].baseId, 0xf);
+    assert.equal(giveItemCalls[0].idempotencyKey, `cell_persistence_pickup_${id}`);
+    assert.ok(!cellPersistence._activeObjectsById.has(id), 'sai do cache depois de pego');
+    assert.ok(despawnCalls.some((c) => c.fn === 'Disable'));
+    assert.ok(despawnCalls.some((c) => c.fn === 'Delete'));
+  });
+
+  it('segunda tentativa no mesmo id falha com already_gone — autoridade final do servidor', async () => {
+    const id = await dropar();
+    const primeira = await cellPersistence.removeObject(id, ATOR, 901);
+    assert.equal(primeira.ok, true);
+
+    giveItemCalls = [];
+    const segunda = await cellPersistence.removeObject(id, ATOR, 901);
+    assert.deepEqual(segunda, { ok: false, reason: 'already_gone' });
+    assert.equal(giveItemCalls.length, 0, 'a segunda tentativa nao pode conceder o item de novo');
+  });
+
+  it('id inexistente falha sem tocar giveItem', async () => {
+    const resultado = await cellPersistence.removeObject(999999, ATOR, 901);
+    assert.deepEqual(resultado, { ok: false, reason: 'already_gone' });
+    assert.equal(giveItemCalls.length, 0);
+  });
+
+  it('id invalido e recusado antes de qualquer query', async () => {
+    assert.deepEqual(await cellPersistence.removeObject(0, ATOR, 901), { ok: false, reason: 'invalid_id' });
+    assert.deepEqual(await cellPersistence.removeObject(-1, ATOR, 901), { ok: false, reason: 'invalid_id' });
+    assert.deepEqual(await cellPersistence.removeObject(NaN, ATOR, 901), { ok: false, reason: 'invalid_id' });
+  });
+
+  it('duas apresentacoes concorrentes do mesmo id: so uma ganha (item 4 do pedido)', async () => {
+    const id = await dropar();
+    giveItemCalls = [];
+
+    const [a, b] = await Promise.all([
+      cellPersistence.removeObject(id, ATOR, 901),
+      cellPersistence.removeObject(id, ATOR, 901)
+    ]);
+
+    const vencedores = [a, b].filter((r) => r.ok);
+    assert.equal(vencedores.length, 1, 'exatamente uma das duas chamadas concorrentes deveria ganhar');
+    assert.equal(giveItemCalls.length, 1, 'o item so pode ser concedido uma vez');
+  });
+});
+
+describe('cell-persistence — resolvedor de alvo TARGET_TYPES.OBJECT (Tarefa 5)', () => {
+  beforeEach(resetar);
+
+  function fakeRegisterResolver() {
+    let resolver = null;
+    const register = (type, fn) => { resolver = fn; };
+    register.get = () => resolver;
+    return register;
+  }
+
+  it('resolve um objeto que esta no cache', async () => {
+    atoresAtivos = [ATOR];
+    posicoes[ATOR] = { pos: [0, 0, 0], cellOrWorldDesc: CELULA_A };
+    const drop = await cellPersistence.recordDrop({ actorId: ATOR, characterId: 901, baseId: 0x10, count: 1, category: 'weapon', value: 0 });
+
+    const registrador = fakeRegisterResolver();
+    cellPersistence.registerInteractionTarget(registrador);
+
+    const alvo = registrador.get()(String(drop.id), ATOR);
+    assert.ok(alvo);
+    assert.equal(alvo.type, interactionRegistry.TARGET_TYPES.OBJECT);
+    assert.equal(alvo.id, `object:${drop.id}`);
+    assert.equal(typeof alvo.assertRange, 'function');
+  });
+
+  it('devolve null para id fora do cache (nunca existiu, ja foi pego, ou expirou)', () => {
+    const registrador = fakeRegisterResolver();
+    cellPersistence.registerInteractionTarget(registrador);
+    assert.equal(registrador.get()('999999', ATOR), null);
+  });
+
+  it('devolve null para entrada nao numerica', () => {
+    const registrador = fakeRegisterResolver();
+    cellPersistence.registerInteractionTarget(registrador);
+    assert.equal(registrador.get()('nao-e-um-id', ATOR), null);
+    assert.equal(registrador.get()(undefined, ATOR), null);
+  });
+
+  it('assertRange aprova dentro do alcance e recusa fora', async () => {
+    atoresAtivos = [ATOR];
+    posicoes[ATOR] = { pos: [0, 0, 0], cellOrWorldDesc: CELULA_A };
+    const drop = await cellPersistence.recordDrop({ actorId: ATOR, characterId: 901, baseId: 0x10, count: 1, category: 'weapon', value: 0 });
+
+    const registrador = fakeRegisterResolver();
+    cellPersistence.registerInteractionTarget(registrador);
+    const alvo = registrador.get()(String(drop.id), ATOR);
+
+    posicoes[ATOR] = { pos: [1, 0, 0], cellOrWorldDesc: CELULA_A }; // pertinho do objeto (dropado em [0,0,0])
+    assert.equal(alvo.assertRange(ATOR, cellPersistence.PICKUP_RANGE).ok, true);
+
+    posicoes[ATOR] = { pos: [cellPersistence.PICKUP_RANGE + 500, 0, 0], cellOrWorldDesc: CELULA_A };
+    const longe = alvo.assertRange(ATOR, cellPersistence.PICKUP_RANGE);
+    assert.equal(longe.ok, false);
+  });
+});
+
+describe('cell-persistence — interacao world_object.pickup (Tarefa 5)', () => {
+  beforeEach(resetar);
+
+  it('registra a interacao com o alcance e a categoria de policy corretos', () => {
+    cellPersistence.registerPickupInteraction();
+    const entry = interactionRegistry.get('world_object.pickup');
+    assert.ok(entry);
+    assert.equal(entry.target, interactionRegistry.TARGET_TYPES.OBJECT);
+    assert.equal(entry.distance, cellPersistence.PICKUP_RANGE);
+    assert.equal(entry.policyAction, cellPersistence.PICKUP_POLICY_ACTION);
+    assert.equal(entry.audit, interactionRegistry.AUDIT_LEVELS.GAMEPLAY);
+  });
+
+  it('canSee e verdadeiro so enquanto o objeto estiver no cache', async () => {
+    cellPersistence.registerPickupInteraction();
+    const entry = interactionRegistry.get('world_object.pickup');
+
+    atoresAtivos = [ATOR];
+    posicoes[ATOR] = { pos: [0, 0, 0], cellOrWorldDesc: CELULA_A };
+    const drop = await cellPersistence.recordDrop({ actorId: ATOR, characterId: 901, baseId: 0x10, count: 1, category: 'weapon', value: 0 });
+
+    const ctxVisivel = { target: { id: `object:${drop.id}` } };
+    assert.equal(await entry.canSee(ctxVisivel), true);
+
+    await cellPersistence.removeObject(drop.id, ATOR, 901);
+    assert.equal(await entry.canSee(ctxVisivel), false, 'depois de pego, nao deveria mais aparecer no menu de outra pessoa');
+  });
+
+  it('execute pega o item e devolve mensagem de sucesso', async () => {
+    cellPersistence.registerPickupInteraction();
+    const entry = interactionRegistry.get('world_object.pickup');
+
+    atoresAtivos = [ATOR];
+    posicoes[ATOR] = { pos: [0, 0, 0], cellOrWorldDesc: CELULA_A };
+    const drop = await cellPersistence.recordDrop({ actorId: ATOR, characterId: 901, baseId: 0x10, count: 1, category: 'weapon', value: 0 });
+    giveItemCalls = [];
+
+    const resultado = await entry.execute({ actorId: ATOR, characterId: 901, target: { id: `object:${drop.id}` } });
+    assert.equal(resultado.message, 'Você pegou o item.');
+    assert.equal(giveItemCalls.length, 1);
+  });
+
+  it('execute lanca quando o item ja foi pego — o pipeline decide a mensagem generica pro jogador', async () => {
+    cellPersistence.registerPickupInteraction();
+    const entry = interactionRegistry.get('world_object.pickup');
+
+    atoresAtivos = [ATOR];
+    posicoes[ATOR] = { pos: [0, 0, 0], cellOrWorldDesc: CELULA_A };
+    const drop = await cellPersistence.recordDrop({ actorId: ATOR, characterId: 901, baseId: 0x10, count: 1, category: 'weapon', value: 0 });
+    await cellPersistence.removeObject(drop.id, ATOR, 901);
+    giveItemCalls = [];
+
+    await assert.rejects(
+      entry.execute({ actorId: ATOR, characterId: 901, target: { id: `object:${drop.id}` } }),
+      /already_gone/
+    );
+    assert.equal(giveItemCalls.length, 0);
   });
 });

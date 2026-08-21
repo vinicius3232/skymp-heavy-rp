@@ -332,18 +332,23 @@ moduleRegistry.register({
   }
 });
 
-// LAB: Persistência de estado de célula (`/dropitem`) — promovido de Pós-Alfa
-// em 21/08/2026, ver HEAVY_RP_GAMEPLAY_SYSTEMS_BACKLOG.md item 6.
+// LAB: Persistência de estado de célula (`/dropitem`, `/pegaritem`) —
+// promovido de Pós-Alfa em 21/08/2026, ver
+// HEAVY_RP_GAMEPLAY_SYSTEMS_BACKLOG.md item 6. Fecha o loop com o Interaction
+// Framework (`world_object.pickup`, alvo `TARGET_TYPES.OBJECT`) — ver o
+// ADENDO no cabeçalho de cell-persistence-service.js para a resposta à §15.
 //
-// ⚠️ Reidratação por polling de célula nunca foi vista em jogo — mesma lacuna
-// de nametag/gestos, ver o cabeçalho de cell-persistence-service.js. Sem
-// catálogo de itens do ESM neste projeto, category/value do drop são
-// argumentos explícitos do comando, não inferidos.
+// ⚠️ Reidratação por polling de célula, e o raycast de crosshair do cliente,
+// nunca foram vistos em jogo — mesma lacuna de nametag/gestos. Sem catálogo
+// de itens do ESM neste projeto, category/value do drop são argumentos
+// explícitos do comando, não inferidos. `dependencies: ['interaction']`
+// porque `registerPickupInteraction` roda no `initialize()` e precisa do
+// framework pronto — a ordenação topológica do module-registry garante isso.
 moduleRegistry.register({
   id: 'cell-persistence',
   enabledBy: 'ENABLE_CELL_PERSISTENCE_SERVICE',
   phase: 'lab',
-  dependencies: [],
+  dependencies: ['interaction'],
   commands: [{
     name: '/dropitem',
     handler: (actorId, args) => {
@@ -369,9 +374,32 @@ moduleRegistry.register({
     },
     description: 'Larga um item no mundo, persistido pelo servidor',
     usage: '/dropitem <baseId hex> <quantidade> [categoria] [valor]'
+  }, {
+    // Caminho utilizável hoje, enquanto `skymp/ui/index.html` não fala
+    // `interaction:*` (INTERACTION_FRAMEWORK.md §14) — mesmo padrão de
+    // `trade-service`, cujos comandos de chat são a interface inteira.
+    name: '/pegaritem',
+    handler: (actorId, args) => {
+      const id = parseInt((args || '').trim(), 10);
+      const charData = commands.getActiveCharacterData(actorId);
+      if (!charData) return;
+      if (!Number.isInteger(id) || id <= 0) {
+        commands.sendNotification(actorId, 'Uso: /pegaritem <id>');
+        return;
+      }
+
+      cellPersistenceService
+        .removeObject(id, actorId, charData.characterId)
+        .then((resultado) => {
+          commands.sendNotification(actorId, resultado.ok ? 'Você pegou o item.' : `Não foi possível pegar o item (${resultado.reason}).`);
+        })
+        .catch((err) => console.error('[cell-persistence] Falha no /pegaritem:', err.message));
+    },
+    description: 'Pega um item persistido do chão pelo seu id',
+    usage: '/pegaritem <id>'
   }],
   initialize: async () => {
-    cellPersistenceService.initCellPersistenceService();
+    cellPersistenceService.initCellPersistenceService({ registerTargetResolver: interactionTargets.registerResolver });
   },
   shutdown: async () => {
     cellPersistenceService.shutdownCellPersistenceService();
@@ -577,6 +605,18 @@ if (typeof mp !== "undefined") {
     isVisibleByOwner: true,
     isVisibleByNeighbors: false,
     updateOwner: nametagService.SNIPPET_DO_CLIENTE,
+    updateNeighbor: ''
+  });
+
+  // Raycast de crosshair para o menu contextual (Tarefa 5) — mesmo motivo do
+  // nametag acima: o alvo sob a mira é a única coisa aqui que só o cliente
+  // sabe. Empurra pra CEF via `window.handleWorldObjectCrosshair`; a CEF ainda
+  // não lê isso (INTERACTION_FRAMEWORK.md §14) — ver o ADENDO em
+  // cell-persistence-service.js.
+  mp.makeProperty('worldObjectCrosshair', {
+    isVisibleByOwner: true,
+    isVisibleByNeighbors: false,
+    updateOwner: cellPersistenceService.CROSSHAIR_SNIPPET_DO_CLIENTE,
     updateNeighbor: ''
   });
 

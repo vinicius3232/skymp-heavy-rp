@@ -40,11 +40,102 @@
  * decisão do registry fica para um TERCEIRO consumidor.
  *
  * Desligado por padrão, como todo lab: `ENABLE_CELL_PERSISTENCE_SERVICE=true`.
+ *
+ * ═══════════════════════════════════════════════════════════════════════════
+ * ADENDO (21/08/2026) — fecha o loop: pickup + Interaction Framework
+ * ═══════════════════════════════════════════════════════════════════════════
+ *
+ * ─── Resposta à §15 da Constituição ───────────────────────────────────────────
+ *
+ * Objetivo: dar ao item persistido (§ escopo acima) um fim de vida — hoje ele
+ * entra em `world_objects` e nunca sai a não ser por TTL de lixo. Sem pickup,
+ * todo item da allowlist (arma/armadura/quest/container_loot, ou qualquer
+ * coisa acima do valor mínimo) fica na tabela **para sempre**, mesmo depois de
+ * alguém já ter pego fisicamente do chão — exatamente a lacuna que
+ * `PERSISTENCE_AUDIT.md` §6 registrou como "a mais séria encontrada".
+ *
+ * Problema que resolve: crescimento sem limite de `world_objects` (§6 do
+ * audit) e a ausência de um caminho jogador→inventário para o que foi
+ * dropado.
+ *
+ * Problemas que cria: um segundo lugar onde "o item existe" pode divergir do
+ * banco se o pickup não for atômico — mitigado pelo `UPDATE ... WHERE
+ * state='active'` condicional (idêntico em espírito ao consumo de
+ * `launch_tickets` em `apps/game-api`), que é também a resposta ao item 4 do
+ * pedido (segurança contra duplicação por lag): duas apresentações
+ * concorrentes do mesmo `id` disputam a mesma linha, só uma ganha.
+ *
+ * Exploits: apresentar um `id` de outra célula/já saqueado (recusado pelo
+ * `state='active'` condicional); repetir o clique de pickup rápido (recusado
+ * pela idempotencyKey do `transactionService.giveItem`, chaveada no `id` da
+ * linha — a segunda chamada não duplica o item mesmo que a primeira UPDATE já
+ * tenha marcado `looted`, porque o idempotency check do ledger é uma segunda
+ * barreira independente); apontar pra um alvo fora de alcance (recusado pelo
+ * `assertRange` do pipeline do Interaction Framework, igual a qualquer outra
+ * interação registrada).
+ *
+ * Impacto econômico: nenhum novo — o item já existia no mundo (foi dropado por
+ * alguém, ou nasceu ali via drop); pickup só move o mesmo item de volta pro
+ * inventário. Sem geração líquida de patrimônio.
+ *
+ * Impacto político/militar/religioso: nenhum de propósito de sistema.
+ *
+ * Social/narrativo: fecha o ciclo físico do RP — dropar algo pra outra pessoa
+ * pegar (comércio informal, herança de campo de batalha, "deixei isso pra
+ * você") deixa de ser gesto cosmético e passa a mover item de verdade.
+ *
+ * Técnico: usa o Interaction Framework existente
+ * (`docs/framework/INTERACTION_FRAMEWORK.md`) pelo canal que ele já previu —
+ * `TARGET_TYPES.OBJECT`, reservado desde a origem do framework e sem dono até
+ * aqui ("o dia em que um módulo precisar, ele chama `registerResolver`"). O
+ * resolvedor do alvo é **síncrono** (contrato do `interaction-targets.js`,
+ * `resolve()` chama `resolver(...)` sem `await`), então ele lê de um cache em
+ * memória (`_activeObjectsById`) populado por `recordDrop`/`rehydrateCell`, e
+ * NÃO consulta o banco — a checagem autoritativa de "o item ainda existe" fica
+ * inteiramente no `execute` (`removeObject`, com o UPDATE condicional acima).
+ * Isso é literalmente a regra central do framework, "canSee não autoriza
+ * nada", aplicada ao pickup: o menu pode oferecer "Pegar" pra um item que já
+ * sumiu um instante depois — o `execute` refaz a verificação e recusa limpo.
+ *
+ * Como balancear: `assertRange` limita a poucos metros (mesmo raio de
+ * `say`, reaproveitado de `core/proximity-ranges.js`); `policyAction`
+ * (`world_object_pickup`, categoria `gather`) bloqueia em estado
+ * algemado/preso/abatido/morto, igual a colher madeira ou minerar.
+ *
+ * Como integra ao mundo: usa o mesmo pipeline (rate limit → alvo → schema →
+ * política → distância → canSee/canExecute → execute → auditoria) que
+ * `law.*`/`stall.*` já usam — nenhuma exceção nova no core.
+ *
+ * ─── Raycast de cliente: o que está provado e o que não está ────────────────
+ *
+ * `CROSSHAIR_SNIPPET_DO_CLIENTE` roda no processo do Skyrim Platform (não na
+ * CEF) e usa `ctx.sp.Game.getCurrentCrosshairRef()` + `.getFormID()` +
+ * `ctx.getFormIdInServerFormat(...)`. O último é o mesmo par obrigatório que
+ * `core/hit-events.js` já usa e documenta como confirmado necessário — FormID
+ * de cliente e de servidor são espaços diferentes.
+ *
+ * **NÃO provado:** que `Game.getCurrentCrosshairRef()` de fato devolve a
+ * referência sob a mira neste build do Skyrim Platform — nunca foi chamado
+ * por este projeto (mesma classe de lacuna que `worldPointToScreenPoint` tem
+ * em `nametag-service.js` §4). O snippet empurra o resultado pra CEF via
+ * `window.handleWorldObjectCrosshair(...)`, no mesmo padrão de
+ * `nametag-service.SNIPPET_DO_CLIENTE` → `window.handleNametag`.
+ *
+ * **`skymp/ui/index.html` ainda não lê `window.handleWorldObjectCrosshair`
+ * nem fala `interaction:*`** — isso já era verdade antes deste adendo
+ * (`INTERACTION_FRAMEWORK.md` §14, "A CEF ainda não usa interaction:*") e
+ * continua sendo um gap rastreado separadamente, não algo que este adendo
+ * resolve. Por isso `/pegaritem <id>` existe: é o caminho utilizável HOJE,
+ * mesmo padrão de `trade-service` ("NÃO tem UI CEF: os comandos de chat são a
+ * interface inteira").
  */
 
 const db = require('./database');
 const commands = require('./commands');
 const transactionService = require('./core/transaction-service');
+const interactionRegistry = require('./core/interaction-registry');
+const actionPolicy = require('./core/action-policy');
+const { RANGES } = require('./core/proximity-ranges');
 const { actorRef } = require('./core/papyrus');
 
 const MODULE = 'cell_persistence';
@@ -72,6 +163,26 @@ const _lastCellByActor = new Map();
 
 /** cellId → true, para não reidratar a mesma célula duas vezes enquanto ela já está ativa. */
 const _rehydratedCells = new Set();
+
+/**
+ * id (world_objects.id) → { id, base_id, pos_x, pos_y, pos_z, angle_z, ref_desc }
+ * para todo objeto que este processo já sabe estar ativo — populado por
+ * `recordDrop`/`rehydrateCell` via `_spawnObject`, removido por `removeObject`
+ * e `sweepExpired`.
+ *
+ * Existe porque `interactionTargets.resolve()` chama o resolvedor de alvo de
+ * forma SÍNCRONA (sem `await` — ver `core/interaction-targets.js`), então o
+ * resolvedor de `TARGET_TYPES.OBJECT` não pode ir ao banco. Este cache é a
+ * fonte rápida para "isto parece existir"; `removeObject` é quem confere a
+ * verdade contra o banco antes de qualquer efeito.
+ */
+const _activeObjectsById = new Map();
+
+/** Alcance de pickup: o mesmo raio de fala normal — quem consegue conversar alcança o chão ao lado. */
+const PICKUP_RANGE = RANGES.say;
+
+/** Id de ação da `core/action-policy.js` — bloqueia pickup em estado algemado/preso/abatido/morto. */
+const PICKUP_POLICY_ACTION = 'world_object_pickup';
 
 /**
  * Decide se um drop persiste "para sempre" (allowlist) ou como lixo com TTL.
@@ -174,6 +285,16 @@ async function recordDrop({ actorId, characterId, baseId, count, category, value
  * nunca lança: falha de spawn não pode derrubar `recordDrop`/`rehydrateCell`.
  */
 function _spawnObject(spawnerActorId, row) {
+  // Entra no cache ANTES do spawn visual: é o que faz o objeto virar um alvo
+  // resolvível (§ADENDO) mesmo se o PlaceAtMe falhar — a linha do banco já é
+  // a fonte da verdade, e recusar o pickup só porque o marcador visual não
+  // apareceu seria pior do que deixar pegar um item invisível.
+  _activeObjectsById.set(row.id, {
+    id: row.id, base_id: row.base_id,
+    pos_x: row.pos_x, pos_y: row.pos_y, pos_z: row.pos_z, angle_z: row.angle_z,
+    ref_desc: null
+  });
+
   if (typeof mp === 'undefined' || typeof mp.callPapyrusFunction !== 'function') return null;
   if (typeof mp.getDescFromId !== 'function') {
     console.warn('[cell-persistence] Spawn indisponível: mp.getDescFromId ausente, sem self válido pro Papyrus.');
@@ -198,6 +319,8 @@ function _spawnObject(spawnerActorId, row) {
 
     const refDesc = typeof mp.getDescFromId === 'function' ? mp.getDescFromId(refId) : null;
     if (refDesc) {
+      const cached = _activeObjectsById.get(row.id);
+      if (cached) cached.ref_desc = refDesc;
       db.query('UPDATE world_objects SET ref_desc = ? WHERE id = ?', [refDesc, row.id]).catch((err) => {
         console.error(`[cell-persistence] Falha ao gravar ref_desc de world_objects.id=${row.id}:`, err.message);
       });
@@ -207,6 +330,79 @@ function _spawnObject(spawnerActorId, row) {
     console.error(`[cell-persistence] Falha ao spawnar world_objects.id=${row.id}:`, err.message);
     return null;
   }
+}
+
+/**
+ * Apaga a referência viva de um objeto pego/expirado, se ela existir.
+ * `Disable` + `Delete` — as duas já aprovadas em `PAPYRUS_USAGE_POLICY.md`.
+ * Best-effort e silencioso: se não houver `ref_desc` (objeto nunca chegou a
+ * spawnar visualmente, ou o processo reiniciou desde então), não há nada pra
+ * apagar, e isso não é erro.
+ */
+function _despawnObject(id) {
+  const cached = _activeObjectsById.get(id);
+  const refDesc = cached?.ref_desc;
+  _activeObjectsById.delete(id);
+  if (!refDesc) return;
+  if (typeof mp === 'undefined' || typeof mp.callPapyrusFunction !== 'function' || typeof mp.getIdFromDesc !== 'function') return;
+
+  try {
+    const refId = mp.getIdFromDesc(refDesc);
+    if (!refId) return;
+    const self = { type: 'form', desc: refDesc };
+    mp.callPapyrusFunction('method', 'ObjectReference', 'Disable', self, []);
+    mp.callPapyrusFunction('method', 'ObjectReference', 'Delete', self, []);
+  } catch (err) {
+    console.error(`[cell-persistence] Falha ao remover a referência viva de world_objects.id=${id}:`, err.message);
+  }
+}
+
+/**
+ * Pega um item do mundo: autoridade final do servidor sobre se ele ainda
+ * existe (item 4 do pedido). O UPDATE condicional é o que decide sob
+ * concorrência — dois jogadores clicando quase juntos, ou lag reapresentando
+ * o mesmo clique, disputam a MESMA linha; só um vê `affectedRows === 1`. É o
+ * mesmo padrão que `apps/game-api.consumeLaunchTicket` usa para uso único.
+ *
+ * A `idempotencyKey` do `giveItem` é uma SEGUNDA barreira, independente do
+ * UPDATE: mesmo que alguém conseguisse chamar isto duas vezes para o mesmo
+ * `id` (não deveria, dado o UPDATE), o ledger recusaria a segunda concessão.
+ *
+ * @param {number} id - world_objects.id
+ * @param {number} actorId
+ * @param {number} characterId
+ * @returns {Promise<{ok: true} | {ok: false, reason: string}>}
+ */
+async function removeObject(id, actorId, characterId) {
+  if (!Number.isInteger(id) || id <= 0) return { ok: false, reason: 'invalid_id' };
+
+  const result = await db.query(
+    `UPDATE world_objects SET state = 'looted' WHERE id = ? AND state = 'active'`,
+    [id]
+  );
+  if (!result.affectedRows) return { ok: false, reason: 'already_gone' };
+
+  const cached = _activeObjectsById.get(id);
+  let baseId = cached?.base_id;
+  if (!baseId) {
+    const rows = await db.query('SELECT base_id FROM world_objects WHERE id = ?', [id]);
+    baseId = rows[0]?.base_id;
+  }
+
+  _despawnObject(id);
+
+  if (!baseId) {
+    console.error(`[cell-persistence] world_objects.id=${id} marcado looted sem base_id resolvivel.`);
+    return { ok: false, reason: 'missing_base_id' };
+  }
+
+  const given = await transactionService.giveItem({
+    actorId, characterId, baseId, count: 1,
+    reason: 'world_pickup', module: MODULE,
+    idempotencyKey: `${MODULE}_pickup_${id}`
+  });
+
+  return given ? { ok: true } : { ok: false, reason: 'inventory_failed' };
 }
 
 /**
@@ -248,6 +444,16 @@ async function rehydrateCell(cellId, spawnerActorId) {
  * @returns {Promise<number>} quantas linhas foram removidas
  */
 async function sweepExpired() {
+  // Precisa saber QUAIS ids somem, não só quantos, pra tirá-los de
+  // `_activeObjectsById` — senão o resolvedor de alvo (síncrono, não consulta
+  // o banco) continuaria oferecendo "Pegar" pra um item que o DELETE abaixo já
+  // apagou, e o pickup falharia com `already_gone` em vez de simplesmente não
+  // aparecer no menu.
+  const expirados = await db.query(
+    `SELECT id FROM world_objects WHERE state = 'active' AND expires_at IS NOT NULL AND expires_at <= NOW()`
+  );
+  for (const { id } of expirados) _despawnObject(id);
+
   const result = await db.query(
     `DELETE FROM world_objects WHERE state = 'active' AND expires_at IS NOT NULL AND expires_at <= NOW()`
   );
@@ -298,7 +504,156 @@ async function tick() {
   }
 }
 
-function initCellPersistenceService() {
+/**
+ * Distância entre o ator e uma posição fixa do mundo (não outro ator).
+ * `core/range-utils.js` só compara dois atores — um `world_objects` não tem
+ * `locationalData` próprio a consultar por FormID quando não está spawnado
+ * (célula não reidratada ainda), então a comparação é sempre contra a posição
+ * GRAVADA no banco, nunca contra a referência viva.
+ *
+ * Mesma honestidade de `range-utils.assertRange`: sem `mp`, devolve
+ * `unverified` em vez de fingir que mediu — é o que mantém isto testável sem
+ * servidor.
+ */
+function _assertRangeToObject(actorId, targetPos, maxRange) {
+  if (typeof mp === 'undefined') return { ok: true, unverified: true };
+  let loc;
+  try {
+    loc = mp.get(actorId, 'locationalData');
+  } catch {
+    loc = null;
+  }
+  if (!loc || !loc.pos) return { ok: false, reason: 'Nao foi possivel validar proximidade.' };
+
+  const [ax, ay, az] = loc.pos;
+  const [ox, oy, oz] = targetPos;
+  const distancia = Math.sqrt((ax - ox) ** 2 + (ay - oy) ** 2 + (az - oz) ** 2);
+  if (distancia > maxRange) return { ok: false, reason: 'Alvo fora de alcance.' };
+  return { ok: true };
+}
+
+/**
+ * Registra o resolvedor de `TARGET_TYPES.OBJECT` no Interaction Framework —
+ * ver o ADENDO no cabeçalho. `registerTargetResolver` é injetado (não
+ * `require('./core/interaction-targets')` direto): a instância viva é criada
+ * uma vez em `phase0-basic.js` e precisa ser A MESMA que `interaction-service`
+ * consulta, não uma nova.
+ */
+function registerInteractionTarget(registerTargetResolver) {
+  if (typeof registerTargetResolver !== 'function') return;
+
+  registerTargetResolver(interactionRegistry.TARGET_TYPES.OBJECT, (rawTargetId, _actorId) => {
+    const id = Number(rawTargetId);
+    if (!Number.isSafeInteger(id) || id <= 0) return null;
+
+    const cached = _activeObjectsById.get(id);
+    if (!cached) return null; // sem dono aqui: ou nunca existiu, ou já foi pego/expirou
+
+    return {
+      type: interactionRegistry.TARGET_TYPES.OBJECT,
+      id: `object:${cached.id}`,
+      label: `Item (0x${cached.base_id.toString(16)})`,
+      assertRange: (fromActorId, maxRange) =>
+        _assertRangeToObject(fromActorId, [cached.pos_x, cached.pos_y, cached.pos_z], maxRange)
+    };
+  });
+}
+
+/**
+ * Registra a interação `world_object.pickup` — "Pegar" no menu contextual
+ * quando o alvo é um item dropado. `execute` é onde a autoridade final mora
+ * (item 4 do pedido): `removeObject` refaz a checagem contra o banco, porque
+ * `canSee`/o resolvedor rodaram sobre o cache, que pode estar desatualizado.
+ *
+ * O motivo específico da falha (`already_gone`, `inventory_failed`, ...) vai
+ * pro `Error` lançado, que `core/interaction-service.js` grava em
+ * `record(entry, ctx, 'error', err.message)` (auditoria/log do servidor) —
+ * **não** é isso que o jogador vê. O pipeline converte qualquer `execute` que
+ * lança na mesma notificação genérica ("Nao foi possivel concluir a acao."),
+ * de propósito (`INTERACTION_FRAMEWORK.md` §10: "ação inexistente e ação
+ * indisponível dão a mesma resposta... não transformar o menu num oráculo").
+ * `/pegaritem`, o caminho por comando de chat, mostra o motivo específico,
+ * porque ali quem está "sondando" já é o próprio dono da conta.
+ */
+function registerPickupInteraction() {
+  actionPolicy.registerAction(PICKUP_POLICY_ACTION, ['gameplay', 'gather'], 'Pegar item do chão');
+
+  interactionRegistry.register({
+    id: 'world_object.pickup',
+    module: MODULE,
+    target: interactionRegistry.TARGET_TYPES.OBJECT,
+    label: 'Pegar',
+    section: 'mundo',
+    order: 10,
+    distance: PICKUP_RANGE,
+    policyAction: PICKUP_POLICY_ACTION,
+    audit: interactionRegistry.AUDIT_LEVELS.GAMEPLAY,
+    idempotent: false,
+    canSee: async (ctx) => _activeObjectsById.has(Number(ctx.target.id.split(':')[1])),
+    execute: async (ctx) => {
+      const objectId = Number(ctx.target.id.split(':')[1]);
+      const resultado = await removeObject(objectId, ctx.actorId, ctx.characterId);
+      if (!resultado.ok) throw new Error(`world_object.pickup falhou: ${'reason' in resultado ? resultado.reason : 'desconhecido'}`);
+      return { message: 'Você pegou o item.' };
+    }
+  });
+}
+
+/**
+ * O trecho que roda NO CLIENTE, dentro do Skyrim Platform (não na CEF).
+ *
+ * Mesma forma de `nametag-service.SNIPPET_DO_CLIENTE`: registrado via
+ * `mp.makeProperty(..., {updateOwner: ...})`, instala o loop uma vez
+ * (`ct.state.worldObjectCrosshair.ligado`) e empurra pra CEF via
+ * `executeJavaScript`, throttlado — não every quadro.
+ *
+ * `ctx.getFormIdInServerFormat` é obrigatório (mesmo par que
+ * `core/hit-events.js` já usa e documenta): o FormID que
+ * `getCurrentCrosshairRef().getFormID()` devolve é do espaço do CLIENTE.
+ *
+ * NUNCA visto rodando — ver o ADENDO no cabeçalho deste arquivo.
+ */
+const CROSSHAIR_INTERVALO_MS = 150;
+
+const CROSSHAIR_SNIPPET_DO_CLIENTE = `
+  ctx.state.worldObjectCrosshair = ctx.state.worldObjectCrosshair || { ligado: false, ultimoEnvio: 0, ultimoFormId: null };
+  var wc = ctx.state.worldObjectCrosshair;
+
+  if (!wc.ligado) {
+    wc.ligado = true;
+
+    ctx.sp.on('update', function () {
+      try {
+        var agora = Date.now();
+        if (agora - wc.ultimoEnvio < ${CROSSHAIR_INTERVALO_MS}) return;
+        wc.ultimoEnvio = agora;
+
+        var ref = ctx.sp.Game.getCurrentCrosshairRef ? ctx.sp.Game.getCurrentCrosshairRef() : null;
+        var formIdServidor = null;
+        if (ref) {
+          var formIdCliente = ref.getFormID();
+          formIdServidor = ctx.getFormIdInServerFormat(formIdCliente);
+        }
+
+        if (formIdServidor === wc.ultimoFormId) return;
+        wc.ultimoFormId = formIdServidor;
+
+        if (!ctx.sp.browser || !ctx.sp.browser.executeJavaScript) return;
+        ctx.sp.browser.executeJavaScript(
+          'window.handleWorldObjectCrosshair && window.handleWorldObjectCrosshair(' + JSON.stringify({ formId: formIdServidor }) + ')'
+        );
+      } catch (e) {
+        // Erro aqui roda no cliente e nao tem pra onde ir. Engolir e o certo:
+        // derrubar o handler mataria a deteccao de mira pelo resto da sessao.
+      }
+    });
+  }
+`;
+
+function initCellPersistenceService(deps = {}) {
+  registerInteractionTarget(deps.registerTargetResolver);
+  registerPickupInteraction();
+
   if (_timer) return;
   _timer = setInterval(() => {
     tick().catch((err) => console.error('[cell-persistence] Falha no tick:', err.message));
@@ -312,12 +667,24 @@ function shutdownCellPersistenceService() {
   _timer = null;
   _lastCellByActor.clear();
   _rehydratedCells.clear();
+  _activeObjectsById.clear();
+  // A interação é removida automaticamente pelo module-registry
+  // (`shutdownAll()` chama `interactionRegistry.unregisterModule(MODULE)`
+  // para todo módulo) — não duplicar essa limpeza aqui.
 }
 
-/** Só para teste: simula um restart do processo sem perder o que está no banco. */
+/**
+ * Só para teste: simula um restart do processo sem perder o que está no
+ * banco. Limpa TODO cache em memória, `_activeObjectsById` incluso — um
+ * restart real perde tudo que não é linha de banco. `rehydrateCell` repovoa
+ * `_activeObjectsById` a partir do banco (via `_spawnObject`) assim que a
+ * célula for reidratada de novo; até lá, o resolvedor de alvo corretamente
+ * não vê o objeto — é o mesmo "nunca reidratado" de antes do primeiro drop.
+ */
 function _resetInMemoryCaches() {
   _lastCellByActor.clear();
   _rehydratedCells.clear();
+  _activeObjectsById.clear();
 }
 
 module.exports = {
@@ -326,14 +693,22 @@ module.exports = {
   MIN_VALUE_THRESHOLD,
   JUNK_TTL_MS,
   TICK_INTERVAL_MS,
+  PICKUP_RANGE,
+  PICKUP_POLICY_ACTION,
+  CROSSHAIR_INTERVALO_MS,
+  CROSSHAIR_SNIPPET_DO_CLIENTE,
   classifyPersistence,
   recordDrop,
   rehydrateCell,
   sweepExpired,
+  removeObject,
   tick,
+  registerInteractionTarget,
+  registerPickupInteraction,
   initCellPersistenceService,
   shutdownCellPersistenceService,
   _resetInMemoryCaches,
   _lastCellByActor,
-  _rehydratedCells
+  _rehydratedCells,
+  _activeObjectsById
 };
