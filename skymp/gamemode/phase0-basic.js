@@ -69,6 +69,7 @@ const nametagService = require(path.join(gamemodeDir, 'nametag-service'));
 const faunaCensus   = require(path.join(gamemodeDir, 'fauna-census'));
 const corpseProbe   = require(path.join(gamemodeDir, 'corpse-probe'));
 const tradeService  = require(path.join(gamemodeDir, 'trade-service'));
+const craftingService = require(path.join(gamemodeDir, 'crafting-service'));
 
 console.log("[phase0] SkyMP Heavy RP gamemode loaded");
 
@@ -415,10 +416,27 @@ moduleRegistry.register({
   }
 });
 
+// LAB: Crafting Modular — receitas de forja/cozinha/curtume/encantamento com
+// gate opcional de profissão/rank (migration-v20-crafting-profession-gate.sql,
+// checado dentro de `craftItem`, ao contrário de `requires_perk` que fica sem
+// uso — ver o cabeçalho de crafting-service.js). Nenhuma receita cadastrada
+// hoje tem `required_profession`; é a staff que amarra via `/addrecipe`.
+// Estação em si continua sem checagem de proximidade real — ver §5 de
+// docs/gameplay/CRAFTING_SYSTEM.md. Nunca rodou num servidor com gente
+// dentro. Reativado em 20/08/2026.
+moduleRegistry.register({
+  id: 'crafting',
+  enabledBy: 'ENABLE_CRAFTING_SERVICE',
+  phase: 'lab',
+  version: '1.0.0',
+  dependencies: [],
+  commands: craftingService.commandDefs(),
+  initialize: async () => {}
+});
+
 // PARKED — Existem no disco e NÃO são registrados até passarem por reengenharia:
 // - economy-regional  (ENABLE_REGIONAL_ECONOMY)
 // - jobs-service      (ENABLE_WOODCUTTING / ENABLE_MINING / ENABLE_FISHING)
-// - crafting-service  (ENABLE_CRAFTING)
 // - housing-service   (ENABLE_HOUSING)
 // - horse-service     (ENABLE_HORSES)
 //

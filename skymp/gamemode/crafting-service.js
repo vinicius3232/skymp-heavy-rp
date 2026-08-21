@@ -19,10 +19,22 @@
  * presentes. Ver `docs/research/INVENTORY_TRADE_CRAFTING_AUDIT.md` §11 e
  * `docs/gameplay/CRAFTING_SYSTEM.md` §5.
  *
- * ⚠️ PARKED: não é registrado no `core/module-registry.js` e não roda em
- * produção. A migração abaixo é de segurança interna — reativar é outra
- * decisão, e misturar as duas é o erro que a Fase 2 do QA_REPORT existe pra
- * não repetir. Ver docs/technical/PARKED_SERVICES_DECISION.md §7.2.
+ * Registrado em `core/module-registry.js` como módulo `crafting` (fase `lab`,
+ * `ENABLE_CRAFTING_SERVICE`, nasce desligado). A migração abaixo era de
+ * segurança interna e ficou separada da decisão de reativar de propósito — a
+ * mistura das duas é o erro que a Fase 2 do QA_REPORT existe pra não repetir.
+ * Ver docs/technical/PARKED_SERVICES_DECISION.md §7.2 para o histórico.
+ *
+ * ─── Gate de profissão (20/08/2026) ─────────────────────────────────────────
+ *
+ * `crafting_recipes.required_profession`/`required_rank`
+ * (migration-v20-crafting-profession-gate.sql) são checados dentro de
+ * `craftItem()`, no mesmo desenho que `resource_nodes.required_profession` já
+ * usa contra `profession-service.js`. NULL continua liberado pra qualquer
+ * personagem — nenhuma receita hoje tem o campo preenchido, então isto não
+ * muda comportamento sozinho; é a staff que passa a poder amarrar uma receita
+ * a `blacksmith`, `smelter`, `tanner`, `enchanter` ou `cook` via `/addrecipe`.
+ * `requires_perk` continua sem uso — não é este o campo que este gate lê.
  *
  * ─── Por que este arquivo mudou ──────────────────────────────────────────────
  *
@@ -50,6 +62,8 @@
 const db = require('./database');
 const commands = require('./commands');
 const inventory = require('./core/inventory');
+const professionService = require('./profession-service');
+const serverOptions = require('./core/server-options');
 const MODULE = 'crafting';
 
 // Tipos de estação e seus formDescs (objetos de referência do Skyrim)
@@ -116,6 +130,31 @@ async function craftItem(actorId, characterId, recipeId, opts = {}) {
       ]);
     }
     return false;
+  }
+
+  // 2.5. Gate de profissão/rank — checado de verdade, ao contrário de
+  // `requires_perk` (ver o cabeçalho deste arquivo). NULL = receita livre.
+  if (recipe.required_profession) {
+    const tem = await professionService.hasProfession(characterId, recipe.required_profession);
+    if (!tem) {
+      if (typeof mp !== 'undefined') {
+        mp.callPapyrusFunction('global', 'Debug', 'notification', null, [
+          `Você precisa ser ${recipe.required_profession} para fazer isso.`
+        ]);
+      }
+      return false;
+    }
+    if (recipe.required_rank !== null && recipe.required_rank !== undefined) {
+      const estado = await professionService.getProfessionState(characterId, recipe.required_profession);
+      if (!estado || estado.rank < recipe.required_rank) {
+        if (typeof mp !== 'undefined') {
+          mp.callPapyrusFunction('global', 'Debug', 'notification', null, [
+            `Seu rank de ${recipe.required_profession} ainda não é suficiente para esta receita.`
+          ]);
+        }
+        return false;
+      }
+    }
   }
 
   // 3. Carrega os ingredientes
@@ -190,6 +229,21 @@ async function craftItem(actorId, characterId, recipeId, opts = {}) {
     ]);
   }
 
+  // XP só quando a receita tem profissão dona — craft livre não progride
+  // profissão nenhuma, pelo mesmo motivo que `mining-service` só concede XP
+  // de `miner`.
+  if (recipe.required_profession) {
+    const xpPorCraft = serverOptions.get('crafting.xpPerCraft');
+    if (xpPorCraft > 0) {
+      await professionService.addProfessionXp({
+        characterId,
+        professionCode: recipe.required_profession,
+        amount: xpPorCraft,
+        context: 'craft'
+      });
+    }
+  }
+
   commands.broadcastProximityMessage(actorId, `* Trabalha com habilidade na estação.`, 500);
   console.log(`[crafting] Char ${characterId} crafted recipe ${recipeId}: ${recipe.name}`);
   return true;
@@ -198,14 +252,19 @@ async function craftItem(actorId, characterId, recipeId, opts = {}) {
 /**
  * Staff: Adiciona uma nova receita ao banco.
  * /addrecipe [station] [resultBaseId] [resultCount] [name]
+ *
+ * `requiredProfession`/`requiredRank` são opcionais — receita sem eles fica
+ * livre para qualquer personagem, o mesmo default de `resource_nodes`.
  */
-async function addRecipe(actorId, stationType, resultBaseId, resultCount, name) {
+async function addRecipe(actorId, stationType, resultBaseId, resultCount, name, requiredProfession = null, requiredRank = null) {
   const adminService = require('./admin-service');
   if (!adminService.hasPermission(actorId, 'manage_recipes')) return null;
 
   const res = await db.query(
-    'INSERT INTO crafting_recipes (name, station_type, result_base_id, result_count) VALUES (?, ?, ?, ?)',
-    [name, stationType, resultBaseId, resultCount]
+    `INSERT INTO crafting_recipes
+      (name, station_type, result_base_id, result_count, required_profession, required_rank)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+    [name, stationType, resultBaseId, resultCount, requiredProfession, requiredRank]
   );
   const recipeId = res.insertId;
 
@@ -233,9 +292,107 @@ async function addIngredient(actorId, recipeId, baseId, count) {
   }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Comandos de chat — sem UI CEF, mesmo padrão de `jobs-service.commandDefs()`.
+// `/craft` e `/receitas` resolvem `characterId` aqui porque `craftItem` e
+// `listRecipes` recebem `characterId` já resolvido (craftItem precisa dele
+// para o gate de profissão e para `inventory.exchange`); os comandos de staff
+// só repassam `actorId`, que é quem `addRecipe`/`addIngredient` já esperam.
+// ─────────────────────────────────────────────────────────────────────────────
+
+function _characterIdFor(actorId) {
+  const character = commands.getActiveCharacterData(actorId);
+  return character ? character.characterId : null;
+}
+
+function commandDefs() {
+  return [
+    {
+      name: '/receitas',
+      description: '[Crafting] Lista as receitas de uma estação',
+      usage: `/receitas <${STATION_TYPES.join('|')}>`,
+      handler: async (actorId, args) => {
+        const stationType = String(args || '').trim();
+        await listRecipes(actorId, stationType);
+      }
+    },
+    {
+      name: '/craft',
+      description: '[Crafting] Fabrica um item numa estação',
+      usage: '/craft <recipeId> [estacao]',
+      handler: async (actorId, args) => {
+        const characterId = _characterIdFor(actorId);
+        if (!characterId) {
+          if (typeof mp !== 'undefined') mp.callPapyrusFunction('global', 'Debug', 'notification', null, ['Personagem não carregado.']);
+          return;
+        }
+        const [bruto, stationType] = String(args || '').trim().split(/\s+/);
+        const recipeId = Number.parseInt(bruto, 10);
+        if (!Number.isSafeInteger(recipeId)) {
+          if (typeof mp !== 'undefined') mp.callPapyrusFunction('global', 'Debug', 'notification', null, ['Uso: /craft <recipeId> [estacao]']);
+          return;
+        }
+        await craftItem(actorId, characterId, recipeId, { stationType });
+      }
+    },
+    {
+      name: '/addrecipe',
+      description: '[Staff] Cria uma receita (opcionalmente presa a uma profissão/rank)',
+      usage: '/addrecipe <estacao> <resultBaseId> <resultCount> <nome> [profissao] [rank]',
+      handler: async (actorId, args) => {
+        const partes = String(args || '').trim().split(/\s+/);
+        const [stationType, resultBaseIdRaw, resultCountRaw, ...resto] = partes;
+        const resultBaseId = Number.parseInt(resultBaseIdRaw, 16);
+        const resultCount = Number.parseInt(resultCountRaw, 10);
+        if (!STATION_TYPES.includes(stationType) || !Number.isSafeInteger(resultBaseId) || !Number.isSafeInteger(resultCount) || resto.length === 0) {
+          if (typeof mp !== 'undefined') {
+            mp.callPapyrusFunction('global', 'Debug', 'notification', null, [
+              'Uso: /addrecipe <estacao> <resultBaseId hex> <resultCount> <nome> [profissao] [rank]'
+            ]);
+          }
+          return;
+        }
+        // O nome pode ter espaço; profissão/rank, se vierem, são as duas
+        // últimas palavras — heurística aceitável porque nome de receita não
+        // termina com um rank numérico isolado.
+        let name = resto.join(' ');
+        let requiredProfession = null;
+        let requiredRank = null;
+        const possivelRank = Number.parseInt(resto[resto.length - 1], 10);
+        if (resto.length >= 2 && Number.isSafeInteger(possivelRank)) {
+          requiredRank = possivelRank;
+          requiredProfession = resto[resto.length - 2];
+          name = resto.slice(0, -2).join(' ');
+        }
+        if (!name) name = resto.join(' ');
+
+        await addRecipe(actorId, stationType, resultBaseId, resultCount, name, requiredProfession, requiredRank);
+      }
+    },
+    {
+      name: '/addingredient',
+      description: '[Staff] Adiciona um ingrediente a uma receita',
+      usage: '/addingredient <recipeId> <baseId hex> <count>',
+      handler: async (actorId, args) => {
+        const [recipeIdRaw, baseIdRaw, countRaw] = String(args || '').trim().split(/\s+/);
+        const recipeId = Number.parseInt(recipeIdRaw, 10);
+        const baseId = Number.parseInt(baseIdRaw, 16);
+        const count = Number.parseInt(countRaw, 10);
+        if (!Number.isSafeInteger(recipeId) || !Number.isSafeInteger(baseId) || !Number.isSafeInteger(count)) {
+          if (typeof mp !== 'undefined') mp.callPapyrusFunction('global', 'Debug', 'notification', null, ['Uso: /addingredient <recipeId> <baseId hex> <count>']);
+          return;
+        }
+        await addIngredient(actorId, recipeId, baseId, count);
+      }
+    }
+  ];
+}
+
 module.exports = {
   listRecipes,
   craftItem,
   addRecipe,
-  addIngredient
+  addIngredient,
+  commandDefs,
+  STATION_TYPES
 };
