@@ -65,6 +65,7 @@ const voipService   = require(path.join(gamemodeDir, 'voip-service'));
 const voiceEndpoint = require(path.join(gamemodeDir, 'core', 'voice', 'voice-endpoint'));
 const soulService   = require(path.join(gamemodeDir, 'soul-service'));
 const nametagService = require(path.join(gamemodeDir, 'nametag-service'));
+const animationService = require(path.join(gamemodeDir, 'animation-service'));
 const faunaCensus   = require(path.join(gamemodeDir, 'fauna-census'));
 const corpseProbe   = require(path.join(gamemodeDir, 'corpse-probe'));
 const tradeService  = require(path.join(gamemodeDir, 'trade-service'));
@@ -328,6 +329,44 @@ moduleRegistry.register({
   },
   shutdown: async () => {
     nametagService.shutdownNametagService();
+  }
+});
+
+// LAB: gestos de RP sincronizados (`/gesto`).
+//
+// Reaproveita a forma de chamada Papyrus já usada por `/anim` (staff, sempre
+// ativo) em vez de inventar uma segunda convenção — ver o cabeçalho de
+// `animation-service.js` para a resposta completa à §15 e o que está provado.
+// `/anim` toca em qualquer ator escolhido por staff; `/gesto` é o próprio
+// jogador tocando em si mesmo, atrás de allowlist fixa e cooldown.
+moduleRegistry.register({
+  id: 'animation',
+  enabledBy: 'ENABLE_ANIMATION_SERVICE',
+  phase: 'lab',
+  dependencies: [],
+  commands: [{
+    name: ['/gesto', '/emote'],
+    handler: (actorId, args) => {
+      const chave = (args || '').trim().split(/\s+/)[0];
+      if (!chave) {
+        commands.sendNotification(actorId, `Gestos disponiveis: ${animationService.listaDeGestos().join(', ')}`);
+        return;
+      }
+      const resultado = animationService.playEmote(actorId, chave);
+      if (!resultado.ok && resultado.motivo === 'desconhecido') {
+        commands.sendNotification(actorId, `Gesto desconhecido. Disponiveis: ${animationService.listaDeGestos().join(', ')}`);
+      }
+      // cooldown falha em silencio de proposito: e feedback visual demais para
+      // um limite anti-spam, mesmo criterio que outros limites deste servidor.
+    },
+    description: 'Reproduz um gesto de RP visivel para quem esta por perto',
+    usage: '/gesto <acenar|reverenciar|aplaudir|rir|negar|saudar>'
+  }],
+  initialize: async () => {
+    animationService.initAnimationService();
+  },
+  shutdown: async () => {
+    animationService.shutdownAnimationService();
   }
 });
 
