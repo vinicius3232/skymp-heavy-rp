@@ -62,6 +62,7 @@ const marketStalls  = require(path.join(gamemodeDir, 'market-stalls-service'));
 const playerPanel   = require(path.join(gamemodeDir, 'player-panel-service'));
 const deathService  = require(path.join(gamemodeDir, 'death-service'));
 const professionService = require(path.join(gamemodeDir, 'profession-service'));
+const miningService = require(path.join(gamemodeDir, 'mining-service'));
 const voipService   = require(path.join(gamemodeDir, 'voip-service'));
 const voiceEndpoint = require(path.join(gamemodeDir, 'core', 'voice', 'voice-endpoint'));
 const soulService   = require(path.join(gamemodeDir, 'soul-service'));
@@ -227,6 +228,28 @@ moduleRegistry.register({
   dependencies: [],
   commands: professionService.commandDefs(),
   initialize: async () => {}
+});
+
+// LAB: Minerador MVP — ⚠️ NÃO HABILITAR EM PRODUÇÃO sem validar em jogo.
+// Registra `mining.mine` no Interaction Framework (alvo `object`, distância
+// medida via `target.assertRange`) — depende de 'interaction' pronto. Depende
+// de 'profession' porque `resource-node-service.consume()` chama
+// `professionService.hasProfession`/`getProfessionState` por baixo. A
+// checagem de distância em si continua assumida a partir de doc oficial, não
+// testada em jogo — ver mining-service.js e docs/gameplay/MINING.md §1.
+moduleRegistry.register({
+  id: 'mining',
+  enabledBy: 'ENABLE_MINING_SERVICE',
+  phase: 'lab',
+  version: '0.2.0',
+  dependencies: ['profession', 'interaction'],
+  commands: [],
+  initialize: async () => {
+    miningService.initMiningService();
+  },
+  shutdown: async () => {
+    miningService.shutdownMiningService();
+  }
 });
 
 moduleRegistry.register({
