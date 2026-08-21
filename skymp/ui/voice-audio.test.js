@@ -457,6 +457,87 @@ describe('cliente — áudio duplicado', () => {
   });
 });
 
+describe('cliente — jitter buffer adaptativo', () => {
+  it('nasce no piso (60ms) e um underrun cresce o colchão em 20ms', () => {
+    voz.playRelayFrame(A, 0.8, quadro());
+    const cadeia = voz.state.relayPeers.get(A);
+    assert.strictEqual(cadeia.jitterS, 0.06, 'piso é o valor inicial');
+
+    // Adianta o relógio pra além do que a cadeia já agendou — é a definição
+    // de underrun: a fonte atrasou e o colchão atual não segurou.
+    voz.state.audioCtx.currentTime = cadeia.nextPlayTime + 0.001;
+    voz.playRelayFrame(A, 0.8, quadro());
+
+    assert.strictEqual(cadeia.jitterS, 0.08, 'cresceu um quadro de 20ms');
+    assert.strictEqual(voz.state.audioStats.underruns, 1);
+  });
+
+  it('o colchão não passa do teto (240ms) por mais underrun que apanhe', () => {
+    voz.playRelayFrame(A, 0.8, quadro());
+    const cadeia = voz.state.relayPeers.get(A);
+    for (let i = 0; i < 20; i++) {
+      voz.state.audioCtx.currentTime = cadeia.nextPlayTime + 0.001;
+      voz.playRelayFrame(A, 0.8, quadro());
+    }
+    assert.strictEqual(cadeia.jitterS, 0.24);
+  });
+
+  it('cada locutor tem o próprio colchão — o underrun de um não afeta o outro', () => {
+    voz.playRelayFrame(A, 0.8, quadro());
+    voz.playRelayFrame(B, 0.8, quadro());
+    const cadeiaA = voz.state.relayPeers.get(A);
+    const cadeiaB = voz.state.relayPeers.get(B);
+
+    voz.state.audioCtx.currentTime = cadeiaA.nextPlayTime + 0.001;
+    voz.playRelayFrame(A, 0.8, quadro());
+
+    assert.strictEqual(cadeiaA.jitterS, 0.08);
+    assert.strictEqual(cadeiaB.jitterS, 0.06, 'quem não apanhou underrun fica no piso');
+  });
+
+  it('depois de uma janela sem underrun, o colchão encolhe 10ms — devagar', () => {
+    voz.playRelayFrame(A, 0.8, quadro());
+    const cadeia = voz.state.relayPeers.get(A);
+    voz.state.audioCtx.currentTime = cadeia.nextPlayTime + 0.001;
+    voz.playRelayFrame(A, 0.8, quadro()); // um underrun: jitterS = 0.08
+    assert.strictEqual(cadeia.jitterS, 0.08);
+
+    // 250 quadros saudáveis, com o relógio andando junto — é o que reprodução
+    // em tempo real faz. Sem avançar `currentTime`, `nextPlayTime` se afasta
+    // do "agora" congelado a cada quadro e cai sozinho no ramo de rajada
+    // adiantada antes de completar a janela, o que não é o cenário que este
+    // teste quer exercitar.
+    for (let i = 0; i < 250; i++) {
+      voz.state.audioCtx.currentTime += 0.02;
+      voz.playRelayFrame(A, 0.8, quadro());
+    }
+
+    assert.strictEqual(cadeia.jitterS, 0.07, 'encolheu meio quadro (10ms), não voltou tudo de vez');
+    assert.strictEqual(voz.state.audioStats.underruns, 1, 'só o primeiro underrun contou');
+  });
+
+  it('o colchão não encolhe abaixo do piso (60ms)', () => {
+    voz.playRelayFrame(A, 0.8, quadro());
+    const cadeia = voz.state.relayPeers.get(A);
+    for (let i = 0; i < 250 * 5; i++) {
+      voz.state.audioCtx.currentTime += 0.02;
+      voz.playRelayFrame(A, 0.8, quadro());
+    }
+    assert.strictEqual(cadeia.jitterS, 0.06);
+  });
+
+  it('rajada de quadros adiantados reencaixa no presente sem contar como underrun', () => {
+    voz.playRelayFrame(A, 0.8, quadro());
+    const cadeia = voz.state.relayPeers.get(A);
+    // Empurra a fila bem à frente do relógio, além do teto de fila (0.5s).
+    cadeia.nextPlayTime = voz.state.audioCtx.currentTime + 10;
+    voz.playRelayFrame(A, 0.8, quadro());
+
+    assert.strictEqual(cadeia.jitterS, 0.06, 'rajada adiantada não é underrun — não cresce o colchão');
+    assert.strictEqual(voz.state.audioStats.underruns, 0);
+  });
+});
+
 describe('cliente — estado de fala e HUD', () => {
   it('`voice_speaking` é repassado ao gamemode para animação', async () => {
     await voz.handleSignal({ type: 'voice_speaking', actorId: A, speaking: true });
