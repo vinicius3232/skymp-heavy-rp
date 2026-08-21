@@ -93,12 +93,38 @@ benefício.
   dias antes desta decisão). Versão pinada, SHA-256 registrado, sem `latest`.
 
 **Dívidas abertas, com nome**
-- **20 ms versus 10 ms.** O projeto inteiro fala quadros de 20 ms; o
-  `captureFrame` direto do SDK aceita **só 10 ms**, e o AEC também. Achado
-  rodando, não lendo. A migração terá que reenquadrar na fronteira.
+- **20 ms versus 10 ms — parcialmente resolvida em 20/08/2026.** O projeto
+  inteiro fala quadros de 20 ms; o `captureFrame` direto do SDK aceita **só
+  10 ms**, e o AEC também. Achado rodando, não lendo.
+
+  Isso importa menos do que parecia no dia 15/08 pra metade do problema: **a
+  captura vai por `PlatformAudio`, não por `captureFrame` manual.** É a
+  consequência direta de já termos decidido usar o ADM do SDK pra ganhar AEC,
+  supressão de ruído e AGC de graça (ver "Por quê" #2 acima) — quem alimenta
+  `captureFrame` a mão, e portanto quem esbarra na exigência de 10 ms, é o
+  `AudioSource` manual que o próprio spike só usa pra gerar o tom sintético de
+  teste (`use_mic = false`). Com `use_mic = true`, o WebRTC ADM captura e
+  entrega no formato que ele mesmo pede — a captura nunca vê essa fronteira.
+
+  **Onde a fronteira de 10 ms continua real: o `processReverseStream` do
+  AEC**, item da dívida seguinte. Espacialização é código nosso, roda no
+  quadro de 20 ms que o resto do projeto usa, e o sinal de referência que
+  alimenta o AEC tem que virar 10 ms antes de entrar no APM. Existe agora um
+  utilitário pronto e testado pra esse corte —
+  [`voice-helper/src/reframe_10ms.h`](../../voice-helper/src/reframe_10ms.h)
+  (`ReframeTo10ms`, 8 casos em `reframe_10ms.test.cpp`, alvo `reframe-10ms-test`
+  no CMake) — genérico o bastante (o tamanho do quadro de 10 ms é parâmetro,
+  não constante) pra servir também se algum dia o `captureFrame` manual voltar
+  a fazer sentido (fallback sem `PlatformAudio`, por exemplo). **Não foi
+  ligado a `processReverseStream` nenhum**: esse fio só existe quando a
+  espacialização em C++ existir, e ela ainda não existe — é código futuro,
+  ligar o utilitário a um chamador que não existe seria a mesma dívida com
+  nome trocado.
+
 - **Espacialização versus AEC.** Se misturarmos e espacializarmos fora do ADM, o
   AEC perde o sinal de referência. Há saída (`processReverseStream` alimentado à
-  mão), não exercitada.
+  mão), não exercitada — e é exatamente onde o reenquadramento acima entra
+  quando essa espacialização for escrita.
 - **Binário sem assinatura** — mesma dívida do `voice-helper.exe` atual.
 
 ## Rollback

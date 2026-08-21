@@ -54,3 +54,18 @@ if(MSVC)
 else()
   target_compile_options(voice-helper PRIVATE -Wall -Wextra)
 endif()
+
+# Alvo separado, de propósito: reframe_10ms.h não depende de miniaudio nem de
+# ixwebsocket, e amarrar o teste ao executável principal obrigaria linkar
+# WASAPI só pra verificar um corte de vetor. Sem framework de teste — é um
+# arquivo, `assert`/prints bastam.
+add_executable(reframe-10ms-test src/reframe_10ms.test.cpp)
+target_compile_features(reframe-10ms-test PRIVATE cxx_std_17)
+if(MSVC)
+  target_compile_options(reframe-10ms-test PRIVATE /W4)
+else()
+  target_compile_options(reframe-10ms-test PRIVATE -Wall -Wextra)
+endif()
+
+enable_testing()
+add_test(NAME reframe_10ms COMMAND reframe-10ms-test)

@@ -84,6 +84,14 @@ cmake --build build --config Release
 
 O binário sai em `build/Release/voice-helper.exe`.
 
+Isso também compila `reframe-10ms-test.exe` — lógica pura de reenquadramento
+de PCM (20ms → 10ms), sem depender de miniaudio nem de ixwebsocket. Roda com
+`ctest` ou direto:
+
+```bash
+build/Release/reframe-10ms-test.exe
+```
+
 Se alguma port não resolver, **anote o erro exato em VOICE_NATIVE_HELPER.md §8
 antes de trocar de biblioteca** — a decisão de usar `miniaudio` está registrada
 com motivo, e trocá-la em silêncio apagaria o motivo junto.
