@@ -118,6 +118,24 @@ Nunca commite `.env` — o `.gitignore` cobre e o CI verifica. Nunca coloque seg
 
 Em produção, `offlineMode: false`. Sempre. Com `offlineMode: true` o cliente declara a própria identidade e o servidor acredita — não há autenticação nenhuma.
 
+### 6.1 `MASTER_KEY` viaja na URL — AUTH-04a
+
+O contrato do Master API não é nosso: `GET /api/servers/:masterKey/sessions/:session` é o formato que o binário do SkyMP chama nativamente (`skymp5-server/ts/systems/login.ts`, a partir da string `master` em `server-settings.json`). Não dá pra tirar a `masterKey` da URL sem modificar o SkyMP compilado, o que a política do projeto proíbe.
+
+**Auditado em `apps/web/server.js`: não há vazamento na aplicação.** Não existe `morgan` nem qualquer middleware de log de acesso — o serviço nunca escreve a URL completa em log próprio. A comparação usa `safeEquals` (tempo constante) e a resposta é 404 uniforme tanto pra `masterKey` errada quanto pra sessão desconhecida, então nem timing nem status code confirmam a chave certa pra quem está adivinhando.
+
+**O risco real está fora deste repositório: no proxy reverso.** Nginx, ALB, Cloudflare e qualquer log de acesso HTTP padrão registram a URL completa por padrão, `masterKey` incluída.
+
+Antes de colocar `apps/web` atrás de um proxy reverso em produção:
+
+1. **Redija o path nos logs de acesso.** Nginx: substitua `$request_uri` por uma versão mascarada no `log_format`, ou use `map` pra apagar o segmento `/api/servers/<masterKey>/`. Confirme que provedores de CDN/WAF (Cloudflare, etc.) também mascaram — muitos guardam o path completo em log de borda por padrão, fora do seu controle direto.
+2. **Rotação da `MASTER_KEY` é a mitigação de fundo**, porque o vazamento em log de infraestrutura nunca é 100% descartável. Procedimento:
+   - gere um valor novo com `openssl rand -hex 32` (ou equivalente);
+   - atualize `MASTER_KEY` no `.env` de `apps/web` e o `masterKey` correspondente em `skymp/config/server-settings.<env>.json` — **os dois precisam mudar juntos**, e nessa ordem: primeiro o painel, depois o servidor de jogo, porque um servidor com a chave antiga simplesmente recebe 404 até ser reiniciado com a nova;
+   - reinicie `apps/web` antes do servidor de jogo, nunca depois — a janela entre os dois é curta (o pool de conexões do servidor de jogo já teria a chave antiga em memória até o próximo restart dele) e não afeta jogadores conectados, só a próxima resolução de sessão;
+   - não há downtime de jogadores já conectados: a `masterKey` só é usada na resolução da `game_session` (login/reconnect), não durante a sessão de jogo em si.
+3. **Rotação de rotina, não só em resposta a incidente.** Sem cadência definida ainda — decisão de operação pendente; o mínimo é rotacionar toda vez que alguém que teve acesso ao `.env` de produção deixar de precisar dele.
+
 ---
 
 ## 7. Quando algo dá errado em jogo

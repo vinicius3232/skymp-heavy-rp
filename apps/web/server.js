@@ -10,6 +10,13 @@ const cors    = require('cors');
 const passport = require('passport');
 const DiscordStrategy = require('passport-discord').Strategy;
 
+// Fonte única do formato de credencial opaca (AUTH-002/AUTH-003) — o mesmo
+// arquivo que `apps/game-api` e o gamemode usam. Zero dependências externas,
+// então requerer pelo caminho relativo através da fronteira de app é seguro;
+// a alternativa (triplicar generate/parse/hash) é o tipo de duplicação que já
+// divergiu sozinha neste projeto antes (CEF, proximity-ranges, papyrus self).
+const credential = require(path.join(__dirname, '..', '..', 'skymp', 'gamemode', 'core', 'opaque-credential'));
+
 const app  = express();
 const PORT = process.env.PANEL_PORT || 3001;
 const INTERNAL_API_SECRET = requireEnv('INTERNAL_API_SECRET');
@@ -691,14 +698,19 @@ app.get('/api/servers/:masterKey/sessions/:session', async (req, res) => {
 
   try {
     const session = req.params.session;
-    if (typeof session !== 'string' || session.length < 32) {
+    // Regra 1 do contrato opaco: rejeitar antes do DB se tipo, kind ou
+    // audience estiverem errados (AUTH_002_OPAQUE_TICKET_V1.md). Um
+    // launch_grant ou queue_grant apresentado aqui por engano nunca deveria
+    // gerar uma consulta a `game_sessions`.
+    const parsed = credential.parse(session);
+    if (!parsed || parsed.kind !== 'game_session' || parsed.audience !== 'skymp:master-api') {
       return res.status(404).json({ error: 'Session not found' });
     }
 
     const rows = await db(
-      `SELECT id, account_id, discord_id FROM game_sessions
+      `SELECT id, account_id, character_id, discord_id FROM game_sessions
        WHERE token_hash = ? AND revoked_at IS NULL AND expires_at > NOW()`,
-      [hashTicket(session)]
+      [credential.hash(session)]
     );
 
     // 404 é o que o SkyMP espera pra sessão inválida: ele manda
@@ -712,8 +724,15 @@ app.get('/api/servers/:masterKey/sessions/:session', async (req, res) => {
       [rows[0].id]
     );
 
-    // A forma da resposta é ditada pelo SkyMP, não por nós: `data.user.id`.
-    res.json({ user: { id: rows[0].account_id, discordId: rows[0].discord_id } });
+    // `user` é a forma que o SkyMP exige (`data.user.id`), não por nós.
+    // `characterId` é aditivo — fecha o AUTH-03 (bind de personagem, ver
+    // migration-v19) para quem já lê daqui; o SkyMP nativo ignora o que não
+    // conhece. `null` quando a sessão foi emitida antes da migration v19 —
+    // ver o comentário lá sobre por que isso não precisa de backfill.
+    res.json({
+      user: { id: rows[0].account_id, discordId: rows[0].discord_id },
+      characterId: rows[0].character_id
+    });
   } catch (err) {
     console.error('[master-api] /sessions', err);
     res.status(500).json({ error: 'Erro interno do servidor' });
@@ -726,20 +745,20 @@ app.get('/api/servers/:masterKey/sessions/:session', async (req, res) => {
 // "Jogar" até a entrada na fila. Curto porque nada nele exige durar mais.
 const LAUNCH_TICKET_TTL_MS = 5 * 60 * 1000;
 
-function hashTicket(token) {
-  return crypto.createHash('sha256').update(token).digest('hex');
-}
-
 /**
  * Emite um ticket de uso único ligado a uma conta. Guarda só o hash — se o
  * banco vazar, os tickets em voo não viram credencial utilizável.
+ *
+ * Formato opaco (AUTH-002): `hrp_lg_v1_<32 bytes aleatórios>`. O `kind`
+ * embutido no prefixo é o que `apps/game-api` valida antes de tocar o banco —
+ * ver `consumeLaunchTicket` lá.
  */
 async function issueLaunchTicket(accountId, discordId, issuedIp) {
-  const token = crypto.randomBytes(32).toString('hex');
+  const token = credential.generate('launch_grant');
   await db(
     `INSERT INTO launch_tickets (token_hash, account_id, discord_id, expires_at, issued_ip)
      VALUES (?, ?, ?, DATE_ADD(NOW(), INTERVAL ? SECOND), ?)`,
-    [hashTicket(token), accountId, discordId, Math.floor(LAUNCH_TICKET_TTL_MS / 1000), issuedIp || null]
+    [credential.hash(token), accountId, discordId, Math.floor(LAUNCH_TICKET_TTL_MS / 1000), issuedIp || null]
   );
   return token;
 }
@@ -843,4 +862,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { app, validateApplication, issueLaunchTicket, hashTicket, pruneCrashReports, CRASH_REPORT_DIR };
+module.exports = { app, validateApplication, issueLaunchTicket, pruneCrashReports, CRASH_REPORT_DIR };

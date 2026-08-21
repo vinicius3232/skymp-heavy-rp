@@ -31,6 +31,15 @@ const mysql = require('mysql2/promise');
 
 const { createQueue } = require('./queue');
 const { createManifestLoader } = require('./modsManifest');
+const pollGrants = require('./pollGrants');
+
+// Fonte única do formato de credencial opaca (AUTH-002/AUTH-003) — mesmo
+// arquivo que `skymp/gamemode` e `apps/web` usam. Sem dependências externas
+// (só `node:crypto`), então requerer por caminho relativo através da fronteira
+// de app é seguro: a alternativa seria triplicar `generate`/`parse`/`hash` e
+// arriscar as três copiarem-se e divergirem, a mesma classe de bug que já
+// aconteceu aqui com CEF/proximity-ranges/papyrus self.
+const credential = require(path.join(__dirname, '..', '..', 'skymp', 'gamemode', 'core', 'opaque-credential'));
 
 const app = express();
 app.disable('x-powered-by');
@@ -66,12 +75,34 @@ const db = async (sql, params = []) => {
 const manifestLoader = createManifestLoader(MANIFEST_PATH);
 const queue = createQueue({ capacity: parseInt(process.env.QUEUE_CAPACITY || '40', 10) });
 
-const makeSessionTicket = () => crypto.randomBytes(32).toString('hex');
+const makeSessionTicket = () => credential.generate('game_session');
 
 // Quanto tempo a sessão de jogo vale. Precisa cobrir uma sessão inteira, com
 // folga pra reconectar depois de um crash — o servidor de jogo consulta o
 // master a cada conexão.
-const GAME_SESSION_TTL_SECONDS = parseInt(process.env.GAME_SESSION_TTL_SECONDS || String(12 * 60 * 60), 10);
+//
+// Absoluto, sem renovação automática por design (AUTH-002 decisão 2,
+// docs/technical/AUTH_002_OPAQUE_TICKET_V1.md): `last_resolved_at`/
+// `resolve_count` são só telemetria. Renovar em silêncio a cada reconexão
+// transformaria um token de N horas em token de vida indefinida enquanto o
+// jogador ficar online, sem ganho de UX real — quando expira, o launcher
+// reautentica via OAuth automaticamente.
+//
+// Teto de 24h: nenhum valor de operação acima disso é aceito. É a defesa
+// contra configurar `GAME_SESSION_TTL_SECONDS` errado por engano (ex.: um
+// zero a mais) e nunca perceber, porque o sintoma — sessão vivendo dias — só
+// aparece muito depois de configurado.
+const GAME_SESSION_TTL_SECONDS_MAX = 24 * 60 * 60;
+const GAME_SESSION_TTL_SECONDS = (() => {
+  const configured = parseInt(process.env.GAME_SESSION_TTL_SECONDS || String(12 * 60 * 60), 10);
+  if (!Number.isInteger(configured) || configured <= 0 || configured > GAME_SESSION_TTL_SECONDS_MAX) {
+    throw new Error(
+      `GAME_SESSION_TTL_SECONDS inválido (${process.env.GAME_SESSION_TTL_SECONDS}) — ` +
+      `precisa ser um inteiro positivo até ${GAME_SESSION_TTL_SECONDS_MAX} (24h).`
+    );
+  }
+  return configured;
+})();
 
 /**
  * Grava a sessão que o servidor de jogo vai resolver contra o master API
@@ -83,12 +114,19 @@ const GAME_SESSION_TTL_SECONDS = parseInt(process.env.GAME_SESSION_TTL_SECONDS |
  *
  * Guardamos só o hash — se o banco vazar, as sessões em voo não viram
  * credencial. Mesmo critério de `launch_tickets`.
+ *
+ * `characterId` e `bound_at` fecham o SECURITY-BLOCKER AUTH-03: a sessão
+ * passa a fixar QUAL personagem, não só qual conta. O bind acontece aqui,
+ * no mesmo instante em que a admissão é persistida — nunca depois, na
+ * conexão — porque `characterId` já foi resolvido antes da entrada na fila
+ * (ver `resolveApprovedCharacter` e a resposta à §15/AUTH-002 em
+ * docs/technical/AUTH_002_OPAQUE_TICKET_V1.md).
  */
-async function persistGameSession(token, accountId, discordId) {
+async function persistGameSession(token, accountId, characterId, discordId) {
   await db(
-    `INSERT INTO game_sessions (token_hash, account_id, discord_id, expires_at)
-     VALUES (?, ?, ?, DATE_ADD(NOW(), INTERVAL ? SECOND))`,
-    [hashTicket(token), accountId, discordId, GAME_SESSION_TTL_SECONDS]
+    `INSERT INTO game_sessions (token_hash, account_id, character_id, discord_id, expires_at, bound_at)
+     VALUES (?, ?, ?, ?, DATE_ADD(NOW(), INTERVAL ? SECOND), NOW())`,
+    [credential.hash(token), accountId, characterId, discordId, GAME_SESSION_TTL_SECONDS]
   );
 }
 
@@ -100,11 +138,29 @@ async function persistGameSession(token, accountId, discordId) {
  * fila e receber um ticket que o servidor de jogo vai recusar seria pior que
  * um erro honesto — o jogador ficaria olhando o Skyrim não conectar sem
  * entender por quê.
+ *
+ * `identity.characterId` cobre o caso de `/api/queue/join` (resolvido ali,
+ * antes de chamar `queue.join`); `result.characterId` cobre `/api/queue/status`
+ * promovendo alguém que já estava esperando — o bind foi feito no join
+ * original, `queue.js` só o carrega adiante. Os dois nunca deveriam divergir
+ * pra a mesma conta; se algum dia divergirem é bug de outro lugar, não motivo
+ * pra escolher um em silêncio.
  */
 async function persistAdmission(result, identity) {
   if (result.status !== 'success' || !result.ticket) return result;
+
+  const characterId = result.characterId ?? identity.characterId ?? null;
+  if (!characterId) {
+    // Não deveria acontecer: `queue.join` sempre recebe characterId antes de
+    // admitir. Se chegou aqui sem um, o bind quebrou antes desta função —
+    // recusar é mais seguro que criar uma game_session órfã de personagem.
+    console.error(`[game-api] Admissão da conta ${identity.accountId} sem characterId — bind ausente.`);
+    queue.release(identity.accountId, makeSessionTicket);
+    return { status: 'error', message: 'character_bind_missing' };
+  }
+
   try {
-    await persistGameSession(result.ticket, identity.accountId, identity.discordId);
+    await persistGameSession(result.ticket, identity.accountId, characterId, identity.discordId);
     return result;
   } catch (err) {
     console.error('[game-api] Falha ao gravar game_session:', err.message);
@@ -138,12 +194,13 @@ function requireInternal(req, res, next) {
   return next();
 }
 
-function hashTicket(token) {
-  return crypto.createHash('sha256').update(token).digest('hex');
-}
-
 /**
  * Valida e consome um ticket de lançamento emitido pelo painel.
+ *
+ * Rejeita antes de tocar o banco se o formato ou o `kind` estiverem errados
+ * (regra 1 do contrato — AUTH_002_OPAQUE_TICKET_V1.md): um `queue_grant` ou
+ * `game_session` apresentado aqui por engano nunca deveria gerar sequer uma
+ * consulta a `launch_tickets`.
  *
  * O UPDATE condicional é o que garante uso único sob concorrência: dois
  * pedidos simultâneos com o mesmo ticket disputam a mesma linha e só um deles
@@ -151,9 +208,10 @@ function hashTicket(token) {
  * janela pra ambos passarem.
  */
 async function consumeLaunchTicket(token) {
-  if (typeof token !== 'string' || token.length < 32) return null;
+  const parsed = credential.parse(token);
+  if (!parsed || parsed.kind !== 'launch_grant') return null;
 
-  const tokenHash = hashTicket(token);
+  const tokenHash = credential.hash(token);
   const [result] = await pool.execute(
     `UPDATE launch_tickets SET consumed_at = NOW()
      WHERE token_hash = ? AND consumed_at IS NULL AND expires_at > NOW()`,
@@ -188,6 +246,33 @@ async function isEligible(accountId) {
   return { ok: true };
 }
 
+/**
+ * Resolve o personagem a vincular à game session (AUTH-003 / CHR-001).
+ *
+ * Até CHR-002 existir, uma conta só pode ter UM personagem `approved` — a
+ * aplicação de personagem já impõe isso (ver whitelist.js). Essa cardinalidade
+ * é o que torna o bind automático seguro: não há escolha nenhuma a fazer,
+ * então não há decisão de UI faltando. `> 1` não é o caminho "escolher o mais
+ * recente" — é uma violação de invariante que ainda não deveria ser possível,
+ * e por isso recusa em vez de adivinhar.
+ *
+ * Quando CHR-002 chegar, a escolha vira input explícito do jogador NESTE MESMO
+ * ponto (join da fila) — a função muda de "resolver sozinho" para "validar a
+ * escolha", mas o momento do bind não muda.
+ */
+async function resolveApprovedCharacter(accountId) {
+  const rows = await db(`SELECT id FROM characters WHERE account_id = ? AND status = 'approved'`, [accountId]);
+  if (rows.length === 0) return null;
+  if (rows.length > 1) {
+    console.error(
+      `[game-api] Conta ${accountId} tem ${rows.length} personagens approved — ` +
+      'seleção explícita (CHR-002) ainda não existe, bind automático recusado.'
+    );
+    return null;
+  }
+  return rows[0].id;
+}
+
 // ── Paridade de modpack ─────────────────────────────────────────────────────
 
 app.get('/mods.json', (req, res) => {
@@ -216,15 +301,22 @@ app.post('/api/queue/join', async (req, res) => {
     const eligible = await isEligible(identity.accountId);
     if (!eligible.ok) return res.status(403).json({ status: 'error', message: eligible.reason });
 
+    // O bind acontece AQUI, junto com o consumo do launch_grant — não depois
+    // da promoção da fila. Ver resolveApprovedCharacter e a resposta à
+    // pergunta 4 do AUTH-002 em docs/technical/AUTH_002_OPAQUE_TICKET_V1.md.
+    const characterId = await resolveApprovedCharacter(identity.accountId);
+    if (!characterId) return res.status(403).json({ status: 'error', message: 'no_approved_character' });
+
     const result = await persistAdmission(
-      queue.join(identity.accountId, identity.discordId, makeSessionTicket),
-      identity
+      queue.join(identity.accountId, identity.discordId, characterId, makeSessionTicket),
+      { ...identity, characterId }
     );
 
-    // O launcher precisa reconsultar a fila, e o ticket de lançamento acabou de
-    // ser consumido — então devolvemos um ticket novo pro polling seguinte.
+    // O launcher precisa reconsultar a fila, e o launch_grant acabou de ser
+    // consumido — devolvemos um queue_grant novo (efêmero, em memória) pro
+    // polling seguinte.
     if (result.status === 'queued') {
-      result.pollTicket = await issuePollTicket(identity.accountId, identity.discordId, ip);
+      result.pollTicket = pollGrants.issue(identity.accountId, identity.discordId);
     }
 
     res.json(result);
@@ -249,6 +341,13 @@ app.post('/api/queue/join', async (req, res) => {
  * `req.query` é deliberadamente ignorado. O teste de regressão em
  * `server.http.test.js` manda um ticket pela query e exige 401 — se alguém
  * reintroduzir a leitura por lá, aquele teste quebra.
+ *
+ * Diferente de `/api/queue/join`, este endpoint consome um `queue_grant`
+ * (`pollGrants`, efêmero em memória), nunca um `launch_grant` — os dois
+ * viviam na mesma tabela `launch_tickets` sem distinção de `kind`, o problema
+ * que AUTH_001_TRUST_BOUNDARY_INVENTORY.md registrou. `characterId` não
+ * precisa ser resolvido de novo aqui: já foi fixado no `join` original e
+ * `queue.status` o devolve de dentro da entrada existente.
  */
 app.post('/api/queue/status', async (req, res) => {
   const ip = req.ip || req.socket.remoteAddress || 'unknown';
@@ -257,7 +356,7 @@ app.post('/api/queue/status', async (req, res) => {
   }
 
   try {
-    const identity = await consumeLaunchTicket((req.body || {}).ticket);
+    const identity = pollGrants.consume((req.body || {}).ticket);
     if (!identity) return res.status(401).json({ status: 'error', message: 'invalid_ticket' });
 
     const result = await persistAdmission(
@@ -265,7 +364,7 @@ app.post('/api/queue/status', async (req, res) => {
       identity
     );
     if (result.status === 'queued') {
-      result.pollTicket = await issuePollTicket(identity.accountId, identity.discordId, ip);
+      result.pollTicket = pollGrants.issue(identity.accountId, identity.discordId);
     }
     res.json(result);
   } catch (err) {
@@ -273,21 +372,6 @@ app.post('/api/queue/status', async (req, res) => {
     res.status(500).json({ status: 'error', message: 'internal_error' });
   }
 });
-
-/**
- * Emite o ticket da próxima consulta. Mantém a propriedade de uso único (um
- * ticket capturado não serve pra nada, porque já foi gasto) sem obrigar o
- * jogador a refazer o login do Discord a cada 5 segundos de polling.
- */
-async function issuePollTicket(accountId, discordId, ip) {
-  const token = crypto.randomBytes(32).toString('hex');
-  await db(
-    `INSERT INTO launch_tickets (token_hash, account_id, discord_id, expires_at, issued_ip)
-     VALUES (?, ?, ?, DATE_ADD(NOW(), INTERVAL 300 SECOND), ?)`,
-    [hashTicket(token), accountId, discordId, ip || null]
-  );
-  return token;
-}
 
 // ── Endpoints internos (gamemode) ───────────────────────────────────────────
 
@@ -332,4 +416,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { app, queue, consumeLaunchTicket, isEligible };
+module.exports = { app, queue, pollGrants, consumeLaunchTicket, isEligible, resolveApprovedCharacter };

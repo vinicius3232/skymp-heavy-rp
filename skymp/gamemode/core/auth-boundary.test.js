@@ -48,7 +48,7 @@ test('auth boundary — o server-settings desta máquina não usa offlineMode', 
 test('auth boundary — Master API resolve a sessão para accountId', () => {
   const web = read('apps/web/server.js');
 
-  assert.match(web, /SELECT id, account_id, discord_id FROM game_sessions/);
+  assert.match(web, /SELECT id, account_id, character_id, discord_id FROM game_sessions/);
   assert.match(web, /user:\s*\{\s*id:\s*rows\[0\]\.account_id/);
   assert.doesNotMatch(web, /user:\s*\{\s*id:\s*rows\[0\]\.discord_id/);
 });
@@ -73,12 +73,14 @@ test('auth boundary — launcher online injeta sessão opaca e remove profileId 
   assert.match(launcher, /delete config\.profileId/);
 });
 
-test('auth boundary — documenta o profileId legado ainda escrito no client settings', () => {
-  // Caracterização deliberada do blocker AUTH-01. Este teste deve ser invertido
-  // em AUTH-003 quando o fluxo online deixar de escrever a identidade legada.
+test('auth boundary — AUTH-01 fechado: launcher não escreve mais profileId legado', () => {
+  // Invertido conforme o próprio plano do teste anterior: o fluxo online agora
+  // remove `gameData.profileId` em vez de gravá-lo. Ver o comentário AUTH-01/
+  // AUTH-003 em apps/launcher/electron/main.ts, junto de `delete`.
   const launcher = read('apps/launcher/electron/main.ts');
 
-  assert.match(launcher, /clientSettings\.gameData\.profileId\s*=/);
+  assert.match(launcher, /delete clientSettings\.gameData\.profileId/);
+  assert.doesNotMatch(launcher, /clientSettings\.gameData\.profileId\s*=/);
   assert.match(launcher, /clientSettings\.gameData\.launcherTicket\s*=/);
 });
 

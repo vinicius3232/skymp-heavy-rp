@@ -25,9 +25,9 @@ function createQueue(options = {}) {
   const reservationTtlMs = options.reservationTtlMs || DEFAULT_RESERVATION_TTL_MS;
   const now = options.now || (() => Date.now());
 
-  // accountId -> { accountId, discordId, sessionTicket, reservedAt, connected }
+  // accountId -> { accountId, discordId, characterId, sessionTicket, reservedAt, connected }
   const _admitted = new Map();
-  // Lista ordenada de { accountId, discordId, joinedAt }
+  // Lista ordenada de { accountId, discordId, characterId, joinedAt }
   let _waiting = [];
 
   /**
@@ -51,6 +51,7 @@ function createQueue(options = {}) {
       _admitted.set(next.accountId, {
         accountId: next.accountId,
         discordId: next.discordId,
+        characterId: next.characterId,
         sessionTicket: makeTicket(next.accountId),
         reservedAt: now(),
         connected: false
@@ -63,29 +64,33 @@ function createQueue(options = {}) {
    * posições nem dois slots — o launcher faz polling, então repetição é o caso
    * normal, não a exceção.
    *
-   * @returns {{status:'success', ticket:string} | {status:'queued', position:number}}
+   * `characterId` é resolvido por quem chama (AUTH-003: bind acontece no
+   * consumo do launch_grant, não depois da promoção) e viaja com a entrada até
+   * a admissão — `status()` nunca precisa dele de novo, porque já está aqui.
+   *
+   * @returns {{status:'success', ticket:string, characterId:number} | {status:'queued', position:number}}
    */
-  function join(accountId, discordId, makeTicket) {
+  function join(accountId, discordId, characterId, makeTicket) {
     _reapExpired();
 
     const existing = _admitted.get(accountId);
-    if (existing) return { status: 'success', ticket: existing.sessionTicket };
+    if (existing) return { status: 'success', ticket: existing.sessionTicket, characterId: existing.characterId };
 
     const waitingIndex = _waiting.findIndex((e) => e.accountId === accountId);
     if (waitingIndex !== -1) {
       _promoteFromWaiting(makeTicket);
       const promoted = _admitted.get(accountId);
-      if (promoted) return { status: 'success', ticket: promoted.sessionTicket };
+      if (promoted) return { status: 'success', ticket: promoted.sessionTicket, characterId: promoted.characterId };
       return { status: 'queued', position: _waiting.findIndex((e) => e.accountId === accountId) + 1 };
     }
 
     if (_admitted.size < capacity) {
       const ticket = makeTicket(accountId);
-      _admitted.set(accountId, { accountId, discordId, sessionTicket: ticket, reservedAt: now(), connected: false });
-      return { status: 'success', ticket };
+      _admitted.set(accountId, { accountId, discordId, characterId, sessionTicket: ticket, reservedAt: now(), connected: false });
+      return { status: 'success', ticket, characterId };
     }
 
-    _waiting.push({ accountId, discordId, joinedAt: now() });
+    _waiting.push({ accountId, discordId, characterId, joinedAt: now() });
     return { status: 'queued', position: _waiting.length };
   }
 
@@ -99,7 +104,7 @@ function createQueue(options = {}) {
     _promoteFromWaiting(makeTicket);
 
     const admitted = _admitted.get(accountId);
-    if (admitted) return { status: 'success', ticket: admitted.sessionTicket };
+    if (admitted) return { status: 'success', ticket: admitted.sessionTicket, characterId: admitted.characterId };
 
     const index = _waiting.findIndex((e) => e.accountId === accountId);
     if (index !== -1) return { status: 'queued', position: index + 1 };

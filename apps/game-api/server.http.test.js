@@ -7,9 +7,11 @@
  *
  * ## Por que isto roda sem MariaDB
  *
- * `consumeLaunchTicket` recusa ticket ausente, não-string ou com menos de 32
- * caracteres **antes** de tocar o banco. Todos os casos aqui caem nessa recusa
- * antecipada, então a suíte não precisa de banco e não fica instável na CI.
+ * `consumeLaunchTicket`/`pollGrants.consume` recusam ticket ausente,
+ * não-string, malformado ou de `kind` errado **antes** de tocar o banco
+ * (regra 1 de AUTH_002_OPAQUE_TICKET_V1.md). Todos os casos aqui caem nessa
+ * recusa antecipada, então a suíte não precisa de banco e não fica instável
+ * na CI.
  *
  * O preço é o limite declarado abaixo: não dá pra testar o caminho feliz sem
  * um banco. Caminho feliz continua sendo trabalho da sessão de teste real.
@@ -130,6 +132,31 @@ describe('fila — recusa antes de tocar o banco', () => {
     // guarda, isto vira 500.
     const res = await request('POST', '/api/queue/status');
     assert.equal(res.status, 401);
+  });
+});
+
+describe('fila — kind errado nunca cruza rota (AUTH-002 regra 1)', () => {
+  const credential = require('../../skymp/gamemode/core/opaque-credential');
+
+  test('/api/queue/join recusa um queue_grant bem-formado, sem tocar o banco', async () => {
+    const queueGrant = credential.generate('queue_grant');
+    const res = await request('POST', '/api/queue/join', { body: { ticket: queueGrant } });
+    assert.equal(res.status, 401);
+    assert.equal(res.body.message, 'invalid_ticket');
+  });
+
+  test('/api/queue/status recusa um launch_grant bem-formado, sem tocar o banco', async () => {
+    const launchGrant = credential.generate('launch_grant');
+    const res = await request('POST', '/api/queue/status', { body: { ticket: launchGrant } });
+    assert.equal(res.status, 401);
+    assert.equal(res.body.message, 'invalid_ticket');
+  });
+
+  test('/api/queue/status recusa um game_session apresentado como queue_grant', async () => {
+    const gameSession = credential.generate('game_session');
+    const res = await request('POST', '/api/queue/status', { body: { ticket: gameSession } });
+    assert.equal(res.status, 401);
+    assert.equal(res.body.message, 'invalid_ticket');
   });
 });
 

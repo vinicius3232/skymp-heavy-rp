@@ -1203,8 +1203,14 @@ ipcMain.handle('launch-game', async (_event, folderPath, ticket) => {
       
       delete clientSettings.gameData.token;
       delete clientSettings.gameData.session;
-      
-      clientSettings.gameData.profileId = parseInt(auth.discordId.slice(-8), 10) || 0;
+
+      // AUTH-01/AUTH-003: não gravar mais profileId derivado do Discord.
+      // Em offlineMode:false (obrigatório fora do laboratório local — ver
+      // auth-boundary.test.js) o SkyMP nunca lê isto; ele resolve o profileId
+      // contra a Master API a partir do launcherTicket abaixo. Gravar um valor
+      // aqui era a identidade do jogador escolhida por um JSON local, viva só
+      // enquanto ninguém regredisse offlineMode para true por engano.
+      delete clientSettings.gameData.profileId;
       clientSettings.gameData.launcherTicket = String(ticket || '');
       clientSettings['server-ip'] = SERVER_IP;
       clientSettings['server-port'] = SERVER_PORT;

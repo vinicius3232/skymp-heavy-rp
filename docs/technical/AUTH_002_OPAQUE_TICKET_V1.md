@@ -1,6 +1,6 @@
 # AUTH-002 — Contrato de credenciais opacas v1
 
-Status: proposta pronta para revisão adversarial do Claude. Não implementada.
+Status: **IMPLEMENTADO em 21/08/2026 (AUTH-003).** `apps/web` (emissão de `launch_grant`), `apps/game-api` (`consumeLaunchTicket`, `pollGrants.js`, `makeSessionTicket`) e a rota Master API adotaram `skymp/gamemode/core/opaque-credential.js` como fonte única do formato — rejeição de `kind`/`audience` errado antes do banco em todo ponto de consumo. `queue_grant` saiu de `launch_tickets` (MariaDB) para `apps/game-api/pollGrants.js` (memória, decisão 1 abaixo). Ver a revisão adversarial ao final deste documento para as quatro decisões e como cada uma foi resolvida no código.
 
 ## Princípio
 
@@ -112,3 +112,39 @@ Qualquer chave com `ticket`, `token`, `session`, `authorization`, `masterKey`, `
 ## Critério de aprovação
 
 AUTH-003 só começa após resposta às quatro decisões, revisão do threat model e aceitação dos vetores de concorrência/replay.
+
+## Revisão adversarial do Claude — 2026-08-21
+
+Baseada no código atual, não só no design: `apps/game-api/queue.js`, `skymp/gamemode/core/opaque-credential.js`, `migration-v8-game-sessions.sql`, e `apps/web/server.js:678`.
+
+### 1. `queue_grant`: MariaDB ou store efêmero?
+
+**Store efêmero (em memória) basta — e já é o que existe.** `queue.js` já implementa a fila inteira como `Map` em processo único, sem qualquer dependência de rede ou banco, por design explícito ("pura manipulação de estado em memória, pra que dê pra testar a política de admissão sem subir nada"). `queue_grant` só precisa sobreviver a um polling de segundos dentro do mesmo processo que o emitiu — nunca cruza serviço. Persistir em MariaDB adicionaria uma escrita por poll (alta frequência, TTL de 2 min) sem ganhar nada: um restart do `game-api` já reresolve fila e admissão do zero, e isso é aceitável porque, pela cadeia do AUTH-001, restart muda *disponibilidade*, não *identidade* — quem está na fila reconecta e reentra.
+
+**Condição que invalida esta resposta:** isso pressupõe `game-api` rodando como instância única (sem load balancer/réplicas). Se houver plano de escalar `game-api` horizontalmente, um `queue_grant` emitido pela réplica A e consultado na réplica B falha silenciosamente — aí sim precisa de store compartilhado (Redis, não MariaDB; é dado de TTL curto, não auditoria). **Isto é decisão de topologia de deploy, não posso assumir sozinho — perguntar ao dono do produto antes de escalar `game-api` para >1 instância.**
+
+**Gate proposto:** comentário/README em `apps/game-api` deixando explícito "single-instance assumption" e um teste que documente essa premissa, para que escalar horizontalmente sem revisar isto quebre de forma visível, não silenciosa.
+
+### 2. TTL de 8h do `game_session`: limite absoluto e renovação?
+
+**Absoluto, sem renovação automática.** `resolve_count`/`last_resolved_at` (migration v8) já existem só como telemetria, não para estender TTL — o próprio AUTH-002 diz isso na linha 63 ("incrementar contador e registrar last-resolved sem renovar TTL automaticamente"). Manter assim: renovação silenciosa a cada reconnect transformaria um token de 8h num token de vida indefinida enquanto o jogador ficar online, o que expande a janela de exposição em caso de vazamento sem nenhum ganho de UX real (uma sessão de RP pesado de 8h contínuas já é generosa). Quando expirar, o launcher reautentica via OAuth automaticamente — o custo de não renovar é baixo porque o fluxo já é automatizado, não manual.
+
+**Ajuste sobre o valor:** 8h não deveria ficar hardcoded — deveria ser configurável via `.env` do jeito que outros parâmetros de auth já são (ver `AUTH_MASTER_KEY` em `check-server-config.js`), com um teto documentado (ex.: nunca aceitar >24h) para que operação não configure algo perigoso por engano.
+
+### 3. Dá pra tirar `masterKey` da URL sem quebrar upstream?
+
+**Não.** `GET /api/servers/:masterKey/sessions/:session` (`apps/web/server.js:678`) não é uma escolha nossa — é o formato exato que o binário do SkyMP (`skymp5-server/ts/systems/login.ts`, citado no comentário da migration v8) chama nativamente a partir da string `master` em `server-settings.json`. Mudar a forma da URL exigiria modificar o cliente Master API dentro do SkyMP compilado, o que contraria a própria restrição do projeto de não tocar binários do SkyMP.
+
+**O que dá pra fazer, e resolve o risco real:** a masterKey em si já é comparada em tempo constante (`safeEquals`) e nunca retorna sinal diferenciado (404 uniforme pra masterKey errada e sessão não encontrada). O que falta é garantir que ela nunca *persista* em log — access log do reverse proxy, middleware de log do Express, APM. **Gate concreto para fechar AUTH-04a:** auditar todo pipeline de log entre o proxy e `apps/web` (nginx/ALB access log format, qualquer `morgan`/logger custom) para confirmar que o path completo não é logado, e documentar rotação do `masterKey` como runbook operacional (é a mitigação padrão para um segredo que não pode sair da URL). Isso é auditoria + runbook, não mudança de contrato.
+
+### 4. Bind de character: antes ou depois da admissão na fila?
+
+**Antes — no consumo do `launch_grant`, junto com o join na fila, não depois da promoção.** A fila (`queue.js`) resolve só capacidade; misturar bind de character com promoção de fila criaria uma corrida onde o tempo de espera (arbitrário, pode ser minutos) fica entre "personagem escolhido" e "personagem confirmado", violando o invariante do CHR-001 de que o bind é imediato e imutável assim que ocorre. A escolha de personagem já acontece no launcher antes do jogador entrar na fila — faz sentido que a requisição de join na fila já carregue a seleção, e o bind vire atômico com o consumo do `launch_grant` (mesma transação que já existe para consumo uso-único). O `game_session` emitido ao sair da fila nasce **já vinculado** a um `character_id`, then CHR-002 não precisa inventar um segundo momento de bind.
+
+### Vetores de concorrência/replay do AUTH-002
+
+Aceitos como escritos — a tabela de vetores (linhas 88-103) já cobre os casos que a implementação atual de `launch_tickets`/`game_sessions` precisa continuar respeitando (consumo atômico, 404 uniforme, sem fallback offline). Nenhum vetor adicional identificado além do que já está listado.
+
+### Decisão de status
+
+Três das quatro perguntas têm resposta fechada por evidência de código (1, 2, 4) ou por restrição de upstream (3). A única pendência real é de topologia de deploy (single-instance `game-api`), que não é uma decisão técnica que eu deva tomar sozinho. **Recomendação: aprovar AUTH-003 condicionado a essa confirmação de topologia**, não travar o trabalho todo por ela.
