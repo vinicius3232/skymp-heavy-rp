@@ -552,9 +552,24 @@ Nada abaixo foi feito neste PR.
    a §10 (o ticket agora é por papel, e um `/voz` emite os dois); o handoff
    automático continua aberto e é Fase 3. O andaime temporário que destrava o
    teste manual está na §11.
-3. **Empacotamento e assinatura do executável**, e integração com o launcher —
-   mesma exigência de carimbo de tempo já registrada em
-   [`LAUNCHER_DISTRIBUTION.md` §6](LAUNCHER_DISTRIBUTION.md).
+3. **Empacotamento — resolvido em 20/08/2026.** O gap real não era
+   assinatura, era que **não existia pipeline nenhum**: o `voice-helper.exe`
+   era compilado à mão desde a Fase 1, e o `downloadUrl` de exemplo em
+   `voice-dist.test.mjs` nunca apontou pra uma release de verdade. Agora
+   existe `.github/workflows/release-voice-helper.yml` — builda, roda os
+   testes de C++ (`reframe_10ms`, `opus_roundtrip`) como gate, empacota só o
+   `.exe` + as DLLs de runtime, e assina se houver certificado.
+   **Assinatura continua pendente** — mesma exigência de carimbo de tempo já
+   registrada em [`LAUNCHER_DISTRIBUTION.md` §6](LAUNCHER_DISTRIBUTION.md),
+   e **o mesmo certificado cobriria os dois `.exe`** sem custo extra (Azure
+   Trusted Signing cobra por assinatura/mês, não por binário). O achado novo:
+   `voice-helper.exe` tem perfil de risco pra SmartScreen/antivírus
+   provavelmente **maior** que o instalador do launcher — é um binário sem
+   reputação nenhuma, que abre socket de rede e acessa microfone, lançado
+   silenciosamente por outro processo. Comprar o certificado continua sendo
+   decisão de negócio (CNPJ, orçamento), não algo que pesquisa resolve.
+   Publicar em GitHub Releases também continua sendo passo humano, igual ao
+   `client-update.json` do launcher.
 
 **Qualidade**
 
