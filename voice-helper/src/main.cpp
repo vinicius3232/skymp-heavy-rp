@@ -254,6 +254,10 @@ struct Options {
   std::string host = "127.0.0.1";
   uint16_t port = 7778;
 
+  // dispositivo de captura — vale para os dois modos
+  int device_index = -1;   // -1 = padrao do sistema
+  bool list_devices = false;
+
   bool valid = false;
   std::string error;
 };
@@ -316,6 +320,11 @@ void PrintUsage(const char* argv0) {
     "  --port      porta do voip-service (padrao: 7778)\n"
     "\n"
     "O ticket vale 30 segundos e so pode ser usado uma vez.\n"
+    "\n"
+    "Dispositivo de captura (vale nos dois modos):\n"
+    "  --list-devices    lista os microfones disponiveis, com indice, e sai\n"
+    "  --device <indice> usa o microfone daquele indice em vez do padrao do SO\n"
+    "\n"
     "Ver voice-helper/README.md.\n",
     argv0, argv0);
 }
@@ -391,12 +400,35 @@ Options ParseArgs(int argc, char** argv) {
       }
       opt.port = static_cast<uint16_t>(n);
       saw_direct = true;
+    } else if (arg == "--list-devices") {
+      opt.list_devices = true;
+    } else if (arg == "--device" && has_next) {
+      long parsed = 0;
+      try {
+        parsed = std::stol(argv[++i]);
+      } catch (const std::exception&) {
+        opt.error = "--device invalido";
+        return opt;
+      }
+      if (parsed < 0) {
+        opt.error = "--device invalido";
+        return opt;
+      }
+      opt.device_index = static_cast<int>(parsed);
     } else if (arg == "--help" || arg == "-h") {
       return opt;
     } else {
       opt.error = "argumento desconhecido: " + arg;
       return opt;
     }
+  }
+
+  // `--list-devices` não abre microfone nem sessão de voz nenhuma — só
+  // enumera e sai. Não faz sentido também exigir `--pair` ou `--ticket` pra
+  // isso, então ele passa por cima da checagem de modo.
+  if (opt.list_devices) {
+    opt.valid = true;
+    return opt;
   }
 
   // Os dois modos juntos seriam ambíguos: um traz o ticket pronto e o outro
@@ -684,6 +716,74 @@ void WatchParent(uint32_t parent_pid, FrameQueue* queue) {
 #endif
 }
 
+// ── dispositivo de captura ────────────────────────────────────────────────
+//
+// Sem `--device`, o helper sempre abriu "o microfone padrão do Windows" —
+// que já é o certo para a maioria, mas não dá escolha a quem tem mais de um
+// microfone (headset + placa de captura, por exemplo). Enumerar não abre
+// dispositivo nenhum: é um `ma_context` que só lista o que o SO já enumerou.
+
+// Lista os microfones disponíveis, com o índice que `--device` espera, e sai
+// sem abrir nenhum. Não depende de `--pair` nem `--ticket` — por isso mora
+// fora de `RunSession`, que é o caminho que já assume uma sessão de voz.
+int ListCaptureDevices() {
+  ma_context context;
+  if (ma_context_init(nullptr, 0, nullptr, &context) != MA_SUCCESS) {
+    std::fprintf(stderr, "[helper] Falha ao inicializar o contexto de audio.\n");
+    return 1;
+  }
+
+  ma_device_info* capture_infos = nullptr;
+  ma_uint32 capture_count = 0;
+  if (ma_context_get_devices(&context, nullptr, nullptr, &capture_infos, &capture_count) != MA_SUCCESS) {
+    std::fprintf(stderr, "[helper] Falha ao enumerar dispositivos de captura.\n");
+    ma_context_uninit(&context);
+    return 1;
+  }
+
+  if (capture_count == 0) {
+    std::fprintf(stderr, "[helper] Nenhum dispositivo de captura encontrado.\n");
+  } else {
+    std::fprintf(stderr, "Microfones disponiveis:\n");
+    for (ma_uint32 i = 0; i < capture_count; ++i) {
+      std::fprintf(stderr, "  [%u]%s %s\n", i,
+                   capture_infos[i].isDefault ? " (padrao)" : "     ",
+                   capture_infos[i].name);
+    }
+    std::fprintf(stderr, "Use --device <indice> pra escolher um. Sem --device, usa o padrao do SO.\n");
+  }
+
+  ma_context_uninit(&context);
+  return 0;
+}
+
+// Traduz um índice de `--list-devices` para o `ma_device_id` que o miniaudio
+// entende. O `ma_context` é fechado aqui dentro — `ma_device_id` é uma union
+// simples, copiável por valor, então sobrevive ao `ma_context_uninit`.
+bool ResolveCaptureDevice(int index, ma_device_id* out_id, std::string& error) {
+  ma_context context;
+  if (ma_context_init(nullptr, 0, nullptr, &context) != MA_SUCCESS) {
+    error = "falha ao inicializar o contexto de audio";
+    return false;
+  }
+  ma_device_info* capture_infos = nullptr;
+  ma_uint32 capture_count = 0;
+  const ma_result r = ma_context_get_devices(&context, nullptr, nullptr, &capture_infos, &capture_count);
+  if (r != MA_SUCCESS) {
+    ma_context_uninit(&context);
+    error = "falha ao enumerar dispositivos de captura";
+    return false;
+  }
+  if (index < 0 || static_cast<ma_uint32>(index) >= capture_count) {
+    ma_context_uninit(&context);
+    error = "--device fora do intervalo (use --list-devices pra ver os indices)";
+    return false;
+  }
+  *out_id = capture_infos[static_cast<ma_uint32>(index)].id;
+  ma_context_uninit(&context);
+  return true;
+}
+
 // ── uma sessão de voz ─────────────────────────────────────────────────────
 //
 // Abre o microfone, conecta, autentica e transmite até cair. Devolve quando a
@@ -701,7 +801,8 @@ struct SessionResult {
 
 SessionResult RunSession(const SessionCredential& cred, bool declara_ptt,
                          FrameQueue& queue, CaptureState& capture_state,
-                         std::atomic<bool>& sessao_ativa) {
+                         std::atomic<bool>& sessao_ativa,
+                         const ma_device_id* capture_device_id = nullptr) {
   SessionResult result;
 
   ma_device_config config = ma_device_config_init(ma_device_type_capture);
@@ -711,13 +812,17 @@ SessionResult RunSession(const SessionCredential& cred, bool declara_ptt,
   // dispositivo do resto do sistema, e o jogador perderia o áudio do Discord,
   // do navegador e de qualquer outra coisa enquanto joga.
   config.capture.shareMode = ma_share_mode_shared;
+  // nullptr = o padrão do SO, igual sempre foi. Só passa a apontar pra outro
+  // quando o operador pediu `--device`.
+  config.capture.pDeviceID = capture_device_id;
   config.sampleRate = kSampleRate;
   config.dataCallback = OnCapture;
   config.pUserData = &capture_state;
 
   ma_device device;
   if (ma_device_init(nullptr, &config, &device) != MA_SUCCESS) {
-    std::fprintf(stderr, "[helper] Falha ao abrir o microfone padrao.\n");
+    std::fprintf(stderr, "[helper] Falha ao abrir o microfone%s.\n",
+                 capture_device_id ? " escolhido (--device)" : " padrao");
     return result;
   }
 
@@ -848,6 +953,22 @@ int main(int argc, char** argv) {
     return 2;
   }
 
+  if (opt.list_devices) {
+    // Enumerar não precisa de rede, de sinal nem de fila — sai direto.
+    return ListCaptureDevices();
+  }
+
+  ma_device_id resolved_device_id{};
+  const ma_device_id* capture_device_id = nullptr;
+  if (opt.device_index >= 0) {
+    std::string device_error;
+    if (!ResolveCaptureDevice(opt.device_index, &resolved_device_id, device_error)) {
+      std::fprintf(stderr, "[helper] %s\n", device_error.c_str());
+      return 2;
+    }
+    capture_device_id = &resolved_device_id;
+  }
+
   std::signal(SIGINT, OnSignal);
   std::signal(SIGTERM, OnSignal);
 
@@ -870,7 +991,7 @@ int main(int argc, char** argv) {
     // Bancada: a credencial já veio pronta, uma sessão só, Ctrl+C pra sair.
     SessionCredential cred{opt.actor_id, opt.ticket, opt.host, opt.port};
     std::printf("[helper] Modo direto (bancada). Ctrl+C pra sair.\n");
-    const SessionResult r = RunSession(cred, opt.ptt, queue, capture_state, sessao_ativa);
+    const SessionResult r = RunSession(cred, opt.ptt, queue, capture_state, sessao_ativa, capture_device_id);
     std::printf("[helper] Encerrando. %llu quadros enviados.\n",
                 static_cast<unsigned long long>(r.frames_sent));
     exit_code = r.auth_failed ? 1 : 0;
@@ -897,7 +1018,7 @@ int main(int argc, char** argv) {
     while (g_running) {
       SessionCredential cred;
       if (!canal.WaitForCredential(cred)) break;
-      const SessionResult r = RunSession(cred, opt.ptt, queue, capture_state, sessao_ativa);
+      const SessionResult r = RunSession(cred, opt.ptt, queue, capture_state, sessao_ativa, capture_device_id);
       std::printf("[helper] Sessao encerrada. %llu quadros enviados.%s\n",
                   static_cast<unsigned long long>(r.frames_sent),
                   g_running ? " Aguardando novo /voz." : "");
