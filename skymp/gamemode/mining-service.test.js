@@ -231,3 +231,147 @@ describe('mining-service — mining.mine no Interaction Framework', () => {
     assert.ok(!mining.activeGatherers.has(42), 'finally deve liberar o characterId mesmo quando consume() lanca');
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ENABLE_MINING_RUNTIME_DIAGNOSTICS — instrumentação da homologação
+// (docs/research/MINING_RUNTIME_VALIDATION_REPORT.md). Não muda resultado
+// nenhum de canSee/execute, só loga. Cobertura: desligado por padrão (nada é
+// impresso), ligado imprime as linhas esperadas com correlationId estável por
+// chamada de execute().
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('mining-service — ENABLE_MINING_RUNTIME_DIAGNOSTICS [instrumentação, sem efeito em gameplay]', () => {
+  beforeEach(() => {
+    interactionRegistry._reset();
+    mining.registerMiningInteractions();
+    nodeAtFormDesc = { formDesc: VEIO_FORMDESC, enabled: true };
+    consumeResult = { ok: true, data: { yield: 2, capacity: 10, maxCapacity: 20 } };
+    xpPerGather = 2;
+    pickaxeCount = 1;
+    mining.activeGatherers.clear();
+    posState.clear();
+    setPos(ATOR, [0, 0, 0]);
+    setPos(VEIO_FORMID, [10, 0, 0]);
+    delete process.env.ENABLE_MINING_RUNTIME_DIAGNOSTICS;
+  });
+
+  it('desligado por padrão: nenhuma linha [mining:diag] é impressa', async (t) => {
+    const logs = [];
+    t.mock.method(console, 'log', (...args) => { logs.push(args.join(' ')); });
+    const service = montarServico();
+    await service.execute(ATOR, { action: 'mining.mine', targetId: VEIO_FORMID });
+    assert.ok(!logs.some((l) => l.includes('[mining:diag]')), 'sem a flag, nenhuma linha de diagnostico deveria sair');
+  });
+
+  it('ligado: imprime target_received/target_resolved na consulta (canSee) e o ciclo completo no execute, com o MESMO correlationId dentro de um execute', async (t) => {
+    process.env.ENABLE_MINING_RUNTIME_DIAGNOSTICS = 'true';
+    const logs = [];
+    t.mock.method(console, 'log', (...args) => { logs.push(args.join(' ')); });
+
+    const service = montarServico();
+    await service.query(ATOR, { targetType: 'object', targetId: VEIO_FORMID });
+    assert.ok(logs.some((l) => l.includes('target_received')));
+    assert.ok(logs.some((l) => l.includes('target_resolved') && l.includes('"nodeFound":true')));
+
+    logs.length = 0;
+    await service.execute(ATOR, { action: 'mining.mine', targetId: VEIO_FORMID });
+
+    // `execute()` revalida via `canSee` antes de rodar `execute` de verdade (o
+    // pipeline documentado é "...distância→canSee→canExecute→dedup→execute..."),
+    // então `target_received`/`target_resolved` (correlationId 'n/a', de
+    // propósito — canSee não pertence a uma tentativa específica) também
+    // aparecem aqui. Só as linhas do PRÓPRIO execute() carregam o
+    // correlationId gerado por `_newCorrelationId`.
+    const linhasExecute = logs.filter((l) => l.includes('[mining:diag]') && !l.includes(' n/a '));
+    assert.ok(linhasExecute.length >= 5, 'espera pelo menos execute_start/tool_check/form_desc_resolved/resource_node_consume/profession_xp_granted/execute_end');
+
+    const ids = new Set(linhasExecute.map((l) => l.split(' ')[1]));
+    assert.equal(ids.size, 1, 'todas as linhas de UM execute() devem carregar o MESMO correlationId');
+
+    assert.ok(linhasExecute.some((l) => l.includes('execute_start')));
+    assert.ok(linhasExecute.some((l) => l.includes('tool_check') && l.includes('"hasPickaxe":true')));
+    assert.ok(linhasExecute.some((l) => l.includes('resource_node_consume') && l.includes('"ok":true')));
+    assert.ok(linhasExecute.some((l) => l.includes('profession_xp_granted')));
+    assert.ok(linhasExecute.some((l) => l.includes('execute_end')));
+  });
+
+  it('ligado, mas sem picareta: loga tool_check com hasPickaxe:false e para — não chega a resource_node_consume', async (t) => {
+    process.env.ENABLE_MINING_RUNTIME_DIAGNOSTICS = 'true';
+    pickaxeCount = 0;
+    const logs = [];
+    t.mock.method(console, 'log', (...args) => { logs.push(args.join(' ')); });
+
+    const service = montarServico();
+    await service.execute(ATOR, { action: 'mining.mine', targetId: VEIO_FORMID });
+
+    assert.ok(logs.some((l) => l.includes('tool_check') && l.includes('"hasPickaxe":false')));
+    assert.ok(!logs.some((l) => l.includes('resource_node_consume')));
+  });
+
+  it('duas execuções sequenciais geram correlationIds DIFERENTES entre si', async (t) => {
+    process.env.ENABLE_MINING_RUNTIME_DIAGNOSTICS = 'true';
+    const logs = [];
+    t.mock.method(console, 'log', (...args) => { logs.push(args.join(' ')); });
+
+    const service = montarServico();
+    await service.execute(ATOR, { action: 'mining.mine', targetId: VEIO_FORMID });
+    const idsExec1 = new Set(logs.filter((l) => l.includes('[mining:diag]') && !l.includes(' n/a ')).map((l) => l.split(' ')[1]));
+    logs.length = 0;
+
+    await service.execute(ATOR, { action: 'mining.mine', targetId: VEIO_FORMID });
+    const idsExec2 = new Set(logs.filter((l) => l.includes('[mining:diag]') && !l.includes(' n/a ')).map((l) => l.split(' ')[1]));
+
+    assert.equal(idsExec1.size, 1);
+    assert.equal(idsExec2.size, 1);
+    assert.notEqual([...idsExec1][0], [...idsExec2][0], 'cada execute() deveria correlacionar suas proprias linhas, nunca misturar com outra tentativa');
+  });
+
+  it('_diagnoseItemCountAvailability: sem mp._sp3ListMethods, loga skip e não lança', () => {
+    const logs = [];
+    const originalLog = console.log;
+    console.log = (...args) => { logs.push(args.join(' ')); };
+    try {
+      process.env.ENABLE_MINING_RUNTIME_DIAGNOSTICS = 'true';
+      assert.doesNotThrow(() => mining._diagnoseItemCountAvailability());
+      assert.ok(logs.some((l) => l.includes('itemcount_availability_check_skipped')));
+    } finally {
+      console.log = originalLog;
+    }
+  });
+
+  it('_diagnoseItemCountAvailability: com mp._sp3ListMethods, reporta registrado:true/false por classe via _sp3ListMethods real (reflexão, não suposição)', () => {
+    const logs = [];
+    const originalLog = console.log;
+    console.log = (...args) => { logs.push(args.join(' ')); };
+    global.mp._sp3ListMethods = (className) => {
+      if (className === 'Actor') return ['IsWeaponDrawn', 'DrawWeapon'];       // sem GetItemCount
+      if (className === 'ObjectReference') return ['GetItemCount', 'AddItem']; // com GetItemCount
+      return [];
+    };
+    try {
+      process.env.ENABLE_MINING_RUNTIME_DIAGNOSTICS = 'true';
+      mining._diagnoseItemCountAvailability();
+      assert.ok(logs.some((l) => l.includes('"className":"Actor"') && l.includes('"registrado":false')));
+      assert.ok(logs.some((l) => l.includes('"className":"ObjectReference"') && l.includes('"registrado":true')));
+    } finally {
+      console.log = originalLog;
+      delete global.mp._sp3ListMethods;
+    }
+  });
+
+  it('_diagnoseItemCountAvailability: desligado por padrão, não chama _sp3ListMethods nem loga nada', () => {
+    const logs = [];
+    const originalLog = console.log;
+    console.log = (...args) => { logs.push(args.join(' ')); };
+    let chamado = false;
+    global.mp._sp3ListMethods = () => { chamado = true; return []; };
+    try {
+      mining._diagnoseItemCountAvailability();
+      assert.equal(chamado, false);
+      assert.equal(logs.length, 0);
+    } finally {
+      console.log = originalLog;
+      delete global.mp._sp3ListMethods;
+    }
+  });
+});

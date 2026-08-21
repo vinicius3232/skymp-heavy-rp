@@ -55,6 +55,38 @@ const { actorRef } = require('./core/papyrus');
 const MODULE = 'mining';
 const PROFESSION_CODE = 'miner';
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Diagnóstico de runtime — ENABLE_MINING_RUNTIME_DIAGNOSTICS
+//
+// Existe só para a homologação registrada em
+// docs/research/MINING_RUNTIME_VALIDATION_REPORT.md: correlacionar, por uma
+// única linha de log por estágio, o que o cliente reportou como alvo, o que
+// `mp.get(formId,'locationalData')` devolveu de verdade em servidor real, o
+// resultado da checagem de ferramenta e o resultado de `consume()` — sem
+// precisar instrumentar cada arquivo na hora do teste manual.
+//
+// Mesmo padrão de flag do resto do projeto (`process.env.X === 'true'`, ver
+// `voip-service.js` e `VOIP_DEBUG_EXPOSE_TICKET`). Desligado por padrão: como
+// todo módulo `lab`, isto não deve rodar em produção — é andaime de teste, não
+// gameplay. Não muda NENHUM resultado de `canSee`/`execute`; só observa.
+//
+// `correlationId` agrupa as linhas de uma mesma tentativa de minerar: gerado
+// uma vez por `execute()`, carregado em todo `_diag()` daquela chamada. Não
+// loga posição/coordenada do jogador em texto (só do alvo, que é público —
+// veio de mineração não é dado sensível de personagem).
+function _diagnosticsEnabled() {
+  return process.env.ENABLE_MINING_RUNTIME_DIAGNOSTICS === 'true';
+}
+
+function _diag(correlationId, stage, payload) {
+  if (!_diagnosticsEnabled()) return;
+  console.log(`[mining:diag] ${correlationId} ${stage} ${JSON.stringify(payload)}`);
+}
+
+function _newCorrelationId(characterId) {
+  return `mine-${characterId}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
 // Mesmo FormID que jobs-service.js (PARKED) já usava — vetado por aquela
 // rodada, não reinventado aqui.
 const ITEM_PICKAXE = 0x000e3c16;
@@ -129,16 +161,36 @@ function registerMiningInteractions() {
     audit: interactionRegistry.AUDIT_LEVELS.ECONOMY,
     // Só aparece no menu se o FormId mirado for de fato um veio ativo. Quem
     // decide de verdade continua sendo `consume()`, revalidado abaixo.
-    canSee: async ctx => Boolean(await _nodeAt(ctx.target.formId)),
+    canSee: async ctx => {
+      const no = await _nodeAt(ctx.target.formId);
+      if (_diagnosticsEnabled()) {
+        _diag('n/a', 'target_received', { formId: `0x${ctx.target.formId.toString(16)}`, targetType: ctx.target.type });
+        _diag('n/a', 'target_resolved', { nodeFound: Boolean(no), rawNode: no || null });
+      }
+      return Boolean(no);
+    },
     execute: async ctx => {
+      const correlationId = _newCorrelationId(ctx.characterId);
+      _diag(correlationId, 'execute_start', {
+        characterId: ctx.characterId,
+        actorId: `0x${ctx.actorId.toString(16)}`,
+        targetFormId: `0x${ctx.target.formId.toString(16)}`,
+        requestId: ctx.requestId || null
+      });
+
       if (activeGatherers.has(ctx.characterId)) {
+        _diag(correlationId, 'blocked_concurrent', {});
         return { message: 'Você já está ocupado fazendo algo.' };
       }
-      if (!_hasPickaxe(ctx.actorId)) {
+
+      const temPicareta = _hasPickaxe(ctx.actorId);
+      _diag(correlationId, 'tool_check', { hasPickaxe: temPicareta, source: 'Actor.GetItemCount (client-trusted, só decide inicio)' });
+      if (!temPicareta) {
         return { message: 'Você precisa de uma picareta.' };
       }
 
       const formDesc = _formDescOf(ctx.target.formId);
+      _diag(correlationId, 'form_desc_resolved', { formDesc });
       if (!formDesc) return { message: FAILURE_MESSAGES.not_found };
 
       activeGatherers.add(ctx.characterId);
@@ -148,6 +200,7 @@ function registerMiningInteractions() {
           actorId: ctx.actorId,
           formDesc
         });
+        _diag(correlationId, 'resource_node_consume', { ok: resultado.ok, code: resultado.code || null, data: resultado.data || null });
 
         if (!resultado.ok) {
           return { message: FAILURE_MESSAGES[resultado.code] || 'Não foi possível minerar agora.' };
@@ -161,6 +214,7 @@ function registerMiningInteractions() {
             amount: xpPorColeta,
             context: 'mining_gather'
           });
+          _diag(correlationId, 'profession_xp_granted', { professionCode: PROFESSION_CODE, amount: xpPorColeta });
         }
 
         return {
@@ -169,13 +223,53 @@ function registerMiningInteractions() {
         };
       } finally {
         activeGatherers.delete(ctx.characterId);
+        _diag(correlationId, 'execute_end', {});
       }
     }
   });
 }
 
+/**
+ * Confere, por reflexão real do VM Papyrus do servidor (`mp._sp3ListMethods`,
+ * `[UPSTREAM CODE]` `ScampServer::SP3ListMethods` → `GetPapyrusVm().ListMethods`),
+ * se `GetItemCount` está registrado nas classes que `_hasPickaxe` chama.
+ *
+ * Existe para responder em milissegundos, sem precisar de um jogador
+ * conectado nem de teste manual, a pergunta que
+ * `docs/research/SKYMP_INTEGRATION_AUDIT.md` (achado nº 5, `BOUND-006`)
+ * deixou em aberto: `Actor.GetItemCount` está mesmo disponível neste
+ * servidor, do jeito que ele está configurado hoje (`archives` vazio,
+ * `skymp/server/data/scripts/` sem `Actor.pex`)? Isto distingue
+ * **PAPYRUS FUNCTION NOT AVAILABLE** (a classe/método não está no VM — é
+ * questão de configuração de archive, resolve-se carregando o `.pex`) de
+ * **PAPYRUS FUNCTION AVAILABLE BUT CALL FAILED** (o método existe, o problema
+ * é outro — argumento errado, `self` inválido, etc.) — as duas produzem o
+ * mesmo sintoma para quem só olha o resultado de `_hasPickaxe`, mas pedem
+ * correção completamente diferente.
+ *
+ * Só roda com a flag de diagnóstico ligada — é reflexão, não gameplay, e
+ * `_sp3*` só existe em servidor real (sem `mp`, não há o que checar).
+ */
+function _diagnoseItemCountAvailability() {
+  if (!_diagnosticsEnabled()) return;
+  if (typeof mp === 'undefined' || typeof mp._sp3ListMethods !== 'function') {
+    _diag('boot', 'itemcount_availability_check_skipped', { reason: 'mp._sp3ListMethods indisponivel (sem mp real, ou versao do SkyMP sem introspeccao _sp3)' });
+    return;
+  }
+  for (const className of ['Actor', 'ObjectReference']) {
+    try {
+      const methods = mp._sp3ListMethods(className) || [];
+      const registrado = methods.includes('GetItemCount');
+      _diag('boot', 'itemcount_availability_check', { className, registrado, totalMetodos: methods.length });
+    } catch (err) {
+      _diag('boot', 'itemcount_availability_check_error', { className, error: err.message });
+    }
+  }
+}
+
 function initMiningService() {
   registerMiningInteractions();
+  _diagnoseItemCountAvailability();
 }
 
 /** Espelha o padrão de `market-stalls-service.shutdownMarketStallsService`. */
@@ -192,5 +286,6 @@ module.exports = {
   registerMiningInteractions,
   FAILURE_MESSAGES,
   // Exposto só para teste.
-  activeGatherers
+  activeGatherers,
+  _diagnoseItemCountAvailability
 };
