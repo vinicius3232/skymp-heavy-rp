@@ -703,9 +703,16 @@ function relayAudioFrame(fromActorId, msg) {
       volume: listener.volume,
       // O efeito viaja com o quadro, e não só no `proximity_update`, porque
       // uma mordaça aplicada entre dois ticks precisa valer no quadro
-      // seguinte — não no próximo tick. É um campo curto; o payload é PCM.
+      // seguinte — não no próximo tick. É um campo curto; o payload é PCM
+      // ou Opus, dependendo de `codec`.
       effect: listener.effect,
       seq: msg.seq,
+      // Repassado sem olhar dentro: o servidor não decodifica (§ acima), só
+      // encaminha o que o locutor declarou. Ausente = PCM cru, o formato de
+      // quem ainda não fala Opus (`voice-helper` antigo já em campo, ou a
+      // sonda de teste) — `decodeRelayFrame` do lado do ouvinte decide por
+      // isso, não pela versão de ninguém.
+      codec: msg.codec,
       data: msg.data
     }));
     delivered++;

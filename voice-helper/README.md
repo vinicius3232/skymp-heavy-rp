@@ -84,12 +84,12 @@ cmake --build build --config Release
 
 O binário sai em `build/Release/voice-helper.exe`.
 
-Isso também compila `reframe-10ms-test.exe` — lógica pura de reenquadramento
-de PCM (20ms → 10ms), sem depender de miniaudio nem de ixwebsocket. Roda com
-`ctest` ou direto:
+Isso também compila dois executáveis de teste, sem depender de miniaudio nem
+de ixwebsocket. Rodam com `ctest` ou direto:
 
 ```bash
-build/Release/reframe-10ms-test.exe
+build/Release/reframe-10ms-test.exe   # reenquadramento de PCM (20ms -> 10ms)
+build/Release/opus-roundtrip-test.exe # encode/decode Opus com a config de producao
 ```
 
 Se alguma port não resolver, **anote o erro exato em VOICE_NATIVE_HELPER.md §8
@@ -207,11 +207,20 @@ Roteiro completo do teste e os números medidos: VOICE_NATIVE_HELPER.md §7.
 
 ## Formato do fio
 
-PCM 16-bit little-endian, mono, 48kHz, quadros de 20ms (960 amostras = 1920
-bytes → 2560 chars em base64).
+Áudio de captura: PCM 16-bit little-endian, mono, 48kHz, quadros de 20ms
+(960 amostras = 1920 bytes → 2560 chars em base64). É a partir disso que o
+`main.cpp` codifica em Opus (`OPUS_APPLICATION_VOIP`, 24 kbit/s) antes de
+mandar — o quadro de 960 amostras já é um tamanho nativo do Opus a 48kHz, sem
+reenquadrar. O pacote Opus, tipicamente **muito** menor que 1920 bytes, é que
+vai em base64 no `data` da mensagem, com `"codec":"opus"` junto. Ver
+`VOICE_NATIVE_HELPER.md` §3.
 
-O mesmo formato aparece em três arquivos e os três precisam concordar; divergir
-faz o áudio sair em velocidade errada em vez de falhar limpo:
+`codec` ausente é PCM cru — o formato legado, que o servidor e o `index.html`
+continuam entendendo sem checar versão de ninguém.
+
+O tamanho de amostra/taxa/canal do áudio de captura aparece em três arquivos e
+os três precisam concordar; divergir faz o áudio sair em velocidade errada em
+vez de falhar limpo:
 
 - `src/main.cpp` — `kSampleRate`, `kChannels`, `kFrameMs`
 - `skymp/gamemode/voip-service.js` — `AUDIO_SAMPLE_RATE`, `AUDIO_CHANNELS`, `AUDIO_FRAME_MS`

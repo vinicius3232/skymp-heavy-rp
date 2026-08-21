@@ -18,6 +18,7 @@ endif()
 
 find_package(ixwebsocket CONFIG REQUIRED)
 find_package(nlohmann_json CONFIG REQUIRED)
+find_package(Opus CONFIG REQUIRED)
 
 add_executable(voice-helper src/main.cpp)
 
@@ -30,6 +31,7 @@ endif()
 target_link_libraries(voice-helper PRIVATE
   ixwebsocket::ixwebsocket
   nlohmann_json::nlohmann_json
+  Opus::opus
 )
 
 if(WIN32)
@@ -69,3 +71,15 @@ endif()
 
 enable_testing()
 add_test(NAME reframe_10ms COMMAND reframe-10ms-test)
+
+# Testa a MESMA configuração de Opus que `RunSession` usa em produção
+# (VOIP, 48kHz, mono, 24 kbit/s) — sem miniaudio nem ixwebsocket, só o codec.
+add_executable(opus-roundtrip-test src/opus_roundtrip.test.cpp)
+target_link_libraries(opus-roundtrip-test PRIVATE Opus::opus)
+target_compile_features(opus-roundtrip-test PRIVATE cxx_std_17)
+if(MSVC)
+  target_compile_options(opus-roundtrip-test PRIVATE /W4)
+else()
+  target_compile_options(opus-roundtrip-test PRIVATE -Wall -Wextra)
+endif()
+add_test(NAME opus_roundtrip COMMAND opus-roundtrip-test)

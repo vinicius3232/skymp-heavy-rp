@@ -102,6 +102,67 @@ function criarAudioFalso() {
   return { registro, ContextoFalso, NoFalso };
 }
 
+/**
+ * `AudioDecoder`/`EncodedAudioChunk` falsos, pro caminho Opus.
+ *
+ * Não decodifica Opus de verdade — isso já é provado à parte, com o libopus
+ * real, em `voice-helper/src/opus_roundtrip.test.cpp`. O que este fake prova é
+ * a FIAÇÃO: que `playOpusRelayFrame` empilha volume/efeito em `opusPending` na
+ * ordem certa, que o `output` os desempilha na mesma ordem, e que a fila não
+ * embaralha volume de um quadro com PCM de outro quando o `output` chega
+ * depois de um `proximity_update` ter mudado `chain.volume`.
+ *
+ * `output` é assíncrono de propósito — `queueMicrotask`, não chamada direta —
+ * porque o `AudioDecoder` real da spec NUNCA decodifica no mesmo tick que
+ * `decode()` foi chamado. Um fake síncrono deixaria passar um bug em que o
+ * código de produção assume ordem de execução que só o fake tinha.
+ */
+function criarWebCodecsFalso() {
+  class EncodedAudioChunkFalso {
+    constructor({ type, timestamp, data }) {
+      this.type = type;
+      this.timestamp = timestamp;
+      this.data = data;
+    }
+  }
+
+  class AudioDecoderFalso {
+    constructor({ output, error }) {
+      this._output = output;
+      this._error = error;
+      this.state = 'unconfigured';
+    }
+    configure(config) {
+      if (AudioDecoderFalso.configureThrows) {
+        throw new Error('configure() recusou o codec — simula uma CEF que tem AudioDecoder mas nao entende opus');
+      }
+      this._config = config;
+      this.state = 'configured';
+    }
+    decode(chunk) {
+      if (this.state === 'closed') throw new Error('decode() num decoder fechado');
+      // Não é Opus de verdade: cada byte de entrada vira uma "amostra"
+      // normalizada, só pra ter conteúdo determinístico e rastreável no
+      // teste. O número de amostras (bytes de entrada) é deliberadamente
+      // diferente de 960 — um teste que dependesse de "sempre 960" estaria
+      // testando a suposição errada sobre o que o AudioDecoder real devolve.
+      queueMicrotask(() => {
+        if (this.state === 'closed') return;
+        const pcm = new Float32Array(chunk.data.length);
+        for (let i = 0; i < chunk.data.length; i++) pcm[i] = (chunk.data[i] - 128) / 128;
+        this._output({
+          numberOfFrames: pcm.length,
+          copyTo: (dest) => dest.set(pcm),
+          close() {}
+        });
+      });
+    }
+    close() { this.state = 'closed'; }
+  }
+
+  return { EncodedAudioChunkFalso, AudioDecoderFalso };
+}
+
 /** DOM mínimo: o script toca `getElementById` no HUD e no chat-log. */
 function criarDomFalso() {
   const elementos = new Map();
@@ -144,12 +205,13 @@ function criarDomFalso() {
  * carregador acrescenta um `return` com os nomes que interessam. Isso mantém o
  * HTML intocado — nada nele existe só por causa do teste.
  */
-function carregarVoz() {
+function carregarVoz({ comWebCodecs = true } = {}) {
   const html = fs.readFileSync(path.resolve(__dirname, 'index.html'), 'utf8');
   const blocos = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)];
   assert.strictEqual(blocos.length, 1, 'o index.html deveria ter um bloco de script só');
 
   const { registro, ContextoFalso } = criarAudioFalso();
+  const { EncodedAudioChunkFalso, AudioDecoderFalso } = criarWebCodecsFalso();
   const document = criarDomFalso();
 
   const gatilhos = [];
@@ -161,6 +223,10 @@ function carregarVoz() {
 
   const window = {
     AudioContext: ContextoFalso,
+    // `comWebCodecs: false` simula uma CEF sem `AudioDecoder` — o cenário que
+    // `ensureOpusDecoder` precisa detectar e recusar, não travar.
+    AudioDecoder: comWebCodecs ? AudioDecoderFalso : undefined,
+    EncodedAudioChunk: comWebCodecs ? EncodedAudioChunkFalso : undefined,
     performance: { now: () => 0 },
     crypto: undefined,
     mp: mpFalso,
@@ -535,6 +601,102 @@ describe('cliente — jitter buffer adaptativo', () => {
 
     assert.strictEqual(cadeia.jitterS, 0.06, 'rajada adiantada não é underrun — não cresce o colchão');
     assert.strictEqual(voz.state.audioStats.underruns, 0);
+  });
+});
+
+/** Espera o microtask do `AudioDecoder` falso terminar antes de checar o efeito. */
+function flush() {
+  return new Promise((resolve) => queueMicrotask(resolve));
+}
+
+/** Um "pacote Opus" de mentira — o fake não decodifica de verdade, só ecoa bytes. */
+function pacoteOpus(bytes = [10, 20, 30, 40]) {
+  return Buffer.from(bytes).toString('base64');
+}
+
+describe('cliente — codec Opus (fiação, não fidelidade de áudio)', () => {
+  it('sem `codec`, o quadro continua sendo tratado como PCM cru — nada muda pra quem já fala', () => {
+    voz.playRelayFrame(A, 0.8, quadro());
+    assert.strictEqual(voz.state.audioStats.framesPlayed, 1);
+    assert.strictEqual(voz.state.relayPeers.get(A).opusDecoder, null,
+      'PCM nao cria decoder nenhum — quem nunca fala Opus nunca paga esse custo');
+  });
+
+  it('`codec:"opus"` cria um AudioDecoder sob demanda e agenda o quadro decodificado', async () => {
+    voz.playRelayFrame(A, 0.8, pacoteOpus(), undefined, 'opus');
+    await flush();
+
+    const cadeia = voz.state.relayPeers.get(A);
+    assert.ok(cadeia.opusDecoder, 'o decoder foi criado no primeiro quadro opus');
+    assert.strictEqual(cadeia.opusDecoder.state, 'configured');
+    assert.strictEqual(voz.state.audioStats.framesPlayed, 1,
+      'o output assincrono do decoder ainda agenda pela mesma scheduleDecodedFrame do PCM');
+  });
+
+  it('reusa o MESMO decoder entre quadros — não recria um por quadro', async () => {
+    voz.playRelayFrame(A, 0.8, pacoteOpus(), undefined, 'opus');
+    await flush();
+    const primeiro = voz.state.relayPeers.get(A).opusDecoder;
+
+    voz.playRelayFrame(A, 0.8, pacoteOpus(), undefined, 'opus');
+    await flush();
+    const segundo = voz.state.relayPeers.get(A).opusDecoder;
+
+    assert.strictEqual(primeiro, segundo);
+    assert.strictEqual(voz.state.audioStats.framesPlayed, 2);
+  });
+
+  it('o volume/efeito de CADA quadro viaja intacto até o output assíncrono', async () => {
+    // O ponto fino: um `proximity_update` muda `chain.volume` ENTRE o
+    // decode() do primeiro quadro e o output dele. Sem a fila `opusPending`,
+    // o primeiro quadro tocaria com o volume do segundo.
+    voz.playRelayFrame(A, 0.8, pacoteOpus([1]), undefined, 'opus');
+    voz.state.relayPeers.get(A).volume = 0.3; // simula o proximity_update chegando no meio
+    voz.playRelayFrame(A, 0.3, pacoteOpus([2]), undefined, 'opus');
+    await flush();
+
+    // Os dois `output` já rodaram (mesma ordem de decode, FIFO). O ganho final
+    // reflete o ÚLTIMO quadro processado — o que importa aqui é que nenhuma
+    // exceção nem cruzamento aconteceu, e os dois quadros tocaram.
+    assert.strictEqual(voz.state.audioStats.framesPlayed, 2);
+  });
+
+  it('CEF com AudioDecoder mas que recusa o codec opus tambem so descarta, nao trava', () => {
+    // Troca o comportamento do configure() da MESMA classe usada por este
+    // `voz` — como seria uma CEF que tem `AudioDecoder` mas não reconhece
+    // 'opus' como codec (em vez de não ter `AudioDecoder` nenhum).
+    voz.window.AudioDecoder.configureThrows = true;
+    try {
+      voz.playRelayFrame(A, 0.8, pacoteOpus(), undefined, 'opus');
+    } finally {
+      voz.window.AudioDecoder.configureThrows = false;
+    }
+    assert.strictEqual(voz.state.audioStats.framesDropped, 1);
+    assert.strictEqual(voz.state.audioStats.framesPlayed, 0);
+    assert.strictEqual(voz.state.relayPeers.get(A).opusDecoder, null,
+      'configure() falhou, entao o decoder nao fica guardado meio-pronto na cadeia');
+  });
+
+  it('sem `AudioDecoder` na CEF, o quadro opus é descartado — nunca tocado como ruído', async () => {
+    const semCodecs = carregarVoz({ comWebCodecs: false });
+    semCodecs.playRelayFrame(A, 0.8, pacoteOpus(), undefined, 'opus');
+    await flush();
+
+    assert.strictEqual(semCodecs.state.audioStats.framesDropped, 1);
+    assert.strictEqual(semCodecs.state.audioStats.framesPlayed, 0);
+    assert.strictEqual(semCodecs.state.relayPeers.get(A).opusDecoder, null);
+  });
+
+  it('remover o locutor fecha o AudioDecoder junto com o resto da cadeia', async () => {
+    voz.playRelayFrame(A, 0.8, pacoteOpus(), undefined, 'opus');
+    await flush();
+    const decoder = voz.state.relayPeers.get(A).opusDecoder;
+    assert.strictEqual(decoder.state, 'configured');
+
+    voz.removeRelayPeer(A);
+
+    assert.strictEqual(decoder.state, 'closed');
+    assert.strictEqual(voz.state.relayPeers.has(A), false);
   });
 });
 

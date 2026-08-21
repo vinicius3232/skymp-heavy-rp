@@ -27,6 +27,7 @@
 // O lado do launcher está em `apps/launcher/electron/voice-dist.mjs`
 // (`helperArgs`, `voiceConfigForClient`).
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -49,6 +50,8 @@
 #define MINIAUDIO_IMPLEMENTATION
 #include <miniaudio.h>
 
+#include <opus/opus.h>
+
 #include <ixwebsocket/IXConnectionState.h>
 #include <ixwebsocket/IXHttp.h>
 #include <ixwebsocket/IXHttpServer.h>
@@ -66,6 +69,19 @@ constexpr ma_uint32 kSampleRate = 48000;
 constexpr ma_uint32 kChannels = 1;
 constexpr ma_uint32 kFrameMs = 20;
 constexpr ma_uint32 kSamplesPerFrame = kSampleRate / 1000 * kFrameMs;  // 960
+
+// Opus, não PCM cru — Fase 2 do formato do fio (VOICE_NATIVE_HELPER.md §3).
+//
+// "A voz fica transparente" na documentação do próprio Opus é a 24 kbit/s pra
+// fala; acima disso o ganho de qualidade não compensa o custo de banda que o
+// PCM cru já provou ser caro (~1 Mbit/s de subida por locutor). A conta cai
+// pra ~30 kbit/s com o overhead do base64, ainda ~30x menor que o PCM.
+constexpr opus_int32 kOpusBitrate = 24000;
+
+// Recomendação do próprio libopus para `max_data_bytes`: grande o bastante
+// pra nunca truncar um quadro, mesmo em complexidade/bitrate mais alto do que
+// o que pedimos hoje. Não é o tamanho típico do pacote — é o teto do buffer.
+constexpr int kMaxOpusPacketBytes = 4000;
 
 // Teto da fila entre a thread de áudio e a de rede, em quadros (~1s).
 //
@@ -784,6 +800,45 @@ bool ResolveCaptureDevice(int index, ma_device_id* out_id, std::string& error) {
   return true;
 }
 
+// ── encoder Opus ──────────────────────────────────────────────────────────
+//
+// RAII de propósito: `RunSession` tem vários `return` cedo (falha ao abrir
+// microfone, falha ao iniciar captura, auth recusada...) e sem isto cada um
+// precisaria lembrar de `opus_encoder_destroy` — o tipo de duplicação que vira
+// vazamento na primeira alteração que esquece um dos pontos de saída.
+class OpusEncoderGuard {
+ public:
+  OpusEncoderGuard(ma_uint32 sample_rate, ma_uint32 channels, opus_int32 bitrate) {
+    int err = OPUS_OK;
+    enc_ = opus_encoder_create(static_cast<opus_int32>(sample_rate),
+                               static_cast<int>(channels), OPUS_APPLICATION_VOIP, &err);
+    if (err != OPUS_OK) {
+      enc_ = nullptr;
+      error_ = opus_strerror(err);
+      return;
+    }
+    opus_encoder_ctl(enc_, OPUS_SET_BITRATE(bitrate));
+    // VOIP como aplicação já assume fala, não música — mas declarar o sinal
+    // explicitamente evita depender do padrão implícito de uma libopus futura.
+    opus_encoder_ctl(enc_, OPUS_SET_SIGNAL(OPUS_SIGNAL_VOICE));
+  }
+
+  ~OpusEncoderGuard() {
+    if (enc_) opus_encoder_destroy(enc_);
+  }
+
+  OpusEncoderGuard(const OpusEncoderGuard&) = delete;
+  OpusEncoderGuard& operator=(const OpusEncoderGuard&) = delete;
+
+  bool ok() const { return enc_ != nullptr; }
+  const std::string& error() const { return error_; }
+  OpusEncoder* get() const { return enc_; }
+
+ private:
+  OpusEncoder* enc_ = nullptr;
+  std::string error_;
+};
+
 // ── uma sessão de voz ─────────────────────────────────────────────────────
 //
 // Abre o microfone, conecta, autentica e transmite até cair. Devolve quando a
@@ -804,6 +859,13 @@ SessionResult RunSession(const SessionCredential& cred, bool declara_ptt,
                          std::atomic<bool>& sessao_ativa,
                          const ma_device_id* capture_device_id = nullptr) {
   SessionResult result;
+
+  OpusEncoderGuard opus_encoder(kSampleRate, kChannels, kOpusBitrate);
+  if (!opus_encoder.ok()) {
+    std::fprintf(stderr, "[helper] Falha ao criar o encoder Opus: %s\n",
+                 opus_encoder.error().c_str());
+    return result;
+  }
 
   ma_device_config config = ma_device_config_init(ma_device_type_capture);
   config.capture.format = ma_format_s16;
@@ -918,11 +980,34 @@ SessionResult RunSession(const SessionCredential& cred, bool declara_ptt,
     // primeira sílaba que alguém de fato ouvir.
     if (!authed) { frame.clear(); continue; }
 
-    const std::string data = Base64Encode(
-        reinterpret_cast<const uint8_t*>(frame.data()),
-        frame.size() * sizeof(int16_t));
+    // `frame.size()` é sempre exatamente `kSamplesPerFrame` (960 = 20ms a
+    // 48kHz) — é a garantia do acumulador em `OnCapture`, e 960 é um dos
+    // tamanhos de quadro que o Opus aceita nativamente a 48kHz. Nenhum
+    // reenquadramento entra aqui (isso é outra fronteira — ver
+    // `reframe_10ms.h` e `ADR_006_SKYVOICE_CLIENT_RTC.md`).
+    std::array<unsigned char, kMaxOpusPacketBytes> opus_buf;
+    const opus_int32 encoded = opus_encode(
+        opus_encoder.get(), frame.data(), static_cast<int>(frame.size()),
+        opus_buf.data(), static_cast<opus_int32>(opus_buf.size()));
+    if (encoded < 0) {
+      // Um quadro que falha ao codificar não pode derrubar a sessão inteira —
+      // é o mesmo princípio do `decodeRelayFrame` do lado do ouvinte, que
+      // descarta um quadro ilegível em vez de fechar o socket.
+      std::fprintf(stderr, "[helper] Falha ao codificar quadro em Opus: %s\n",
+                   opus_strerror(encoded));
+      frame.clear();
+      continue;
+    }
 
-    nlohmann::json out{{"type", "audio_frame"}, {"seq", seq++}, {"data", data}};
+    const std::string data =
+        Base64Encode(opus_buf.data(), static_cast<size_t>(encoded));
+
+    // `codec` explícito, não implícito por porta ou versão: um `voice-helper`
+    // antigo em campo (como o que já foi baixado e testado contra produção)
+    // continua mandando PCM cru sem este campo, e `decodeRelayFrame` do lado
+    // do ouvinte decide pelo que está no quadro, não pela versão do binário.
+    nlohmann::json out{{"type", "audio_frame"}, {"seq", seq++},
+                        {"codec", "opus"}, {"data", data}};
     ws.send(out.dump());
     frame.clear();
 
