@@ -189,7 +189,7 @@ Arquivos liberados para o outro agente:
 | VOI-001 | conjunto | conjunto | PLANNED | capacidade de laboratório |
 | OPS-001 | conjunto | conjunto | PLANNED | MOD-001 |
 
-Preparação adicional concluída em 2026-08-12: ADR de identidade online, auditoria de atomicidade do launch ticket, biblioteca isolada de credenciais opacas, config doctor e desenho de CHR-001. O estado detalhado e os gates de revisão estão em `CODEX_PRE_CLAUDE_HANDOFF_2026-08-12.md`.
+Preparação adicional concluída em 2026-08-12: ADR de identidade online, auditoria de atomicidade do launch ticket, biblioteca isolada de credenciais opacas, config doctor e desenho de CHR-001. O estado detalhado e os gates de revisão estão em [`../historico/CODEX_PRE_CLAUDE_HANDOFF_2026-08-12.md`](../historico/CODEX_PRE_CLAUDE_HANDOFF_2026-08-12.md) (registro histórico).
 
 ## Definição de pronto do ciclo conjunto
 

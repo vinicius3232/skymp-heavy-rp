@@ -121,11 +121,11 @@ O texto acima é autoritativo e não foi alterado. Este anexo é a primeira cois
 
 ## A.1 O risco de a constituição atrasar a única coisa que falta
 
-**A §14 diz "nunca implementar primeiro". O estado real do projeto é que nada nunca rodou.** 273 testes verdes, zero sessões com jogador. A pior falha possível aqui não é design ruim — é continuar produzindo documentação excelente de um mundo que não existe.
+**A §14 diz "nunca implementar primeiro". O estado real do projeto é que nada nunca rodou.** 1270 testes verdes, zero sessões com jogador — o primeiro número já foi 273 quando este anexo foi escrito, e o segundo não mudou, que é exatamente a tensão descrita aqui. A pior falha possível aqui não é design ruim — é continuar produzindo documentação excelente de um mundo que não existe.
 
 Aplicada sem limite, a §14 congela o teste in-game, porque validar o que já existe não é "feature" e portanto nunca entra na fila de 15 pontos.
 
-**Resolução adotada:** o portão de 15 pontos vale para **mecânica nova de mundo**. Não vale para (a) corrigir bug, (b) validar o que já existe, (c) infraestrutura de teste e operação. A Fase 0 — rodar o plano de teste in-game — é pré-requisito de tudo neste documento, não concorrente dele.
+**Resolução adotada:** o portão de 15 pontos vale para **mecânica nova de mundo**. Não vale para (a) corrigir bug, (b) validar o que já existe, (c) infraestrutura de teste e operação. A Fase 0 — rodar o [roteiro de teste in-game](technical/FASE_0_ROTEIRO.md) — é pré-requisito de tudo neste documento, não concorrente dele.
 
 ## A.2 "Sistema que depende da staff" proibiria a whitelist
 
