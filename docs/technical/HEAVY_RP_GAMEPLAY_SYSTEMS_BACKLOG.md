@@ -135,13 +135,55 @@ Escopo:
 
 Decisao: ADOTAR depois de chat + identidade + spawn.
 
+### 6. Persistencia de Estado de Celula (World Objects)
+
+Promovido de Pos-Alfa em 21/08/2026, por decisao do dono do produto — antecipa
+parte de "Containers, baus e corpos gerenciados" antes do resto da Fase 0
+fechar. Registrado aqui em vez de silenciosamente, porque a versao anterior
+deste documento (11/07/2026) tinha o motivo oposto por escrito: "depende de
+estabilidade de rede, identidade, logs e inventario confiavel" — nenhuma
+dessas dependencias mudou de status, a decisao foi aceitar o risco.
+
+**Nao e a mesma coisa que "Manipulacao livre de props"**, que continua
+rejeitada em Ideias Estacionadas / Sistemas Rejeitados. A diferenca:
+manipulacao livre e o CLIENTE decidindo onde um objeto existe; isto aqui e o
+SERVIDOR decidindo o que persiste, a partir de uma allowlist fixa em codigo —
+o jogador aciona um drop/saque que ja existe (inventory-service), o servidor
+decide se aquele item específico entra em `world_objects` ou nao. Nenhuma
+posicao arbitraria de cliente e aceita sem validacao.
+
+Escopo:
+
+- `CellPersistenceService`: grava/reidrata objetos de mundo por celula.
+- Allowlist server-side por categoria/valor — a maioria dos itens dropados
+  (o "lixo" de inventario padrao) explicitamente NAO persiste, so expira.
+- Spawn via `ObjectReference.PlaceAtMe` (ja aprovado em
+  `PAPYRUS_USAGE_POLICY.md`, ja usado por `market-stalls-service.js` para o
+  marcador visual da barraca) — nao e capacidade nova da engine, e reuso de
+  um caminho ja no contrato.
+
+Server-authoritative:
+
+- Cliente nunca envia posicao de spawn; o servidor le a posicao de onde o
+  drop/saque aconteceu, que ja vem do estado do lado servidor.
+- Toda gravacao/reidratacao logada (mesmo padrao de audit_logs/gold_transactions).
+
+Nao resolvido por este item, fica para quando "Containers, baus e corpos
+gerenciados" for retomado por completo: baus fixos do mundo, corpos com loot
+administrado, e a integracao com o Interaction Framework para saque via UI.
+
+Decisao: ADOTAR agora, como `lab` atras de flag — ver o checklist abaixo.
+**Nenhum item deste checklist esta satisfeito ainda** (Fase 0 §6/§7/§8 seguem
+pendentes: dois clientes, mudanca de celula, inventario). Construir o codigo
+agora e deliberado; LIGAR em producao antes desses testes passarem nao e.
+
 ## Pos-Alfa
 
 Sistemas importantes, mas nao agora:
 
 - VOIP por proximidade.
 - Casas e propriedades.
-- Containers, baus e corpos gerenciados.
+- Containers, baus e corpos gerenciados (parcialmente promovido — ver item 6 do Prototipo da Fase 1: so a persistencia de world_objects avancou, baus/corpos administrados continuam aqui).
 - Prisao, multas, fianca e ficha criminal.
 - Faccao, territorio e cerco.
 - Economia regional.

@@ -349,7 +349,12 @@ Duas mudanças de comportamento vieram junto:
   nada, e um menu de RP que oferece gestos vazios ensina o jogador a ignorá-lo.
 
 ## 14. O que NÃO está feito
-- **A CEF ainda não usa `interaction:*`.** `skymp/ui/index.html` continua no `governance:interaction:*` e mantém o próprio `ACTION_CONFIG`.
-- **`stall.manage` não tem lugar no menu** — depende de alvo `self`, que o framework não permite. O comando de chat continua sendo o caminho. Quando `object`/`container` ganhar resolvedor, a barraca vira alvo de verdade e a ação volta.
-- **Seis dos sete tipos de alvo não têm resolvedor.** Por escolha (§6).
-- **Nada disto rodou numa sessão real.** 96 testes verdes e zero jogadores.
+
+**Correção de 21/08/2026 (Tarefa 6): os dois itens abaixo estavam desatualizados neste documento e foram corrigidos por evidência de código, não por suposição.**
+
+- ~~A CEF ainda não usa `interaction:*`~~ **— falso desde algum momento entre 13/08 e 21/08.** `skymp/ui/index.html` já fala `interaction:query`/`interaction:execute` de verdade para alvo `player` (`openInteractionMenu`, `sendUiEvent('interaction:query', ...)`, linha ~1055). O que **continua** faltando: o gatilho que abre o menu. `mp.events.add('interaction:open', ...)` está registrado na CEF, mas **nada no repositório rastreado chama o lado nativo que dispararia esse evento** — o mesmo padrão de listener morto que o próprio código já documenta ter existido para `voip:connect` ("um listener que nunca funcionou de verdade — nada no servidor jamais dava `mp.trigger` nele", `index.html` linha ~1278). Sem esse gatilho, o menu de interação nunca abre por ação do jogador, para NENHUM tipo de alvo — não é um problema específico de objeto/pickup, é anterior e maior.
+- **Cinco dos sete tipos de alvo não têm resolvedor** (era "seis" — `object` ganhou o dele na Tarefa 5, `world_object.pickup` em `cell-persistence-service.js`). Por escolha (§6) pros outros cinco.
+- **`stall.manage` não tem lugar no menu** — depende de alvo `self`, que o framework não permite. O comando de chat continua sendo o caminho. `object` já tem resolvedor (linha acima), mas é dono de `cell-persistence-service`, não de `market-stalls-service` — a barraca ainda precisaria do próprio resolvedor ou de um tipo dedicado pra virar alvo de verdade.
+- **Nada disto rodou numa sessão real.** 96+ testes verdes e zero jogadores — nem mesmo o caminho `player` que já fala o protocolo certo.
+
+**Próximo passo concreto para fechar o gatilho** (não feito nesta revisão — risco real de regressão num fluxo que hoje funciona, sem cliente pra testar contra): estender o snippet de crosshair (`CROSSHAIR_SNIPPET_DO_CLIENTE`, `cell-persistence-service.js`) com detecção de tecla (`ctx.sp.on('keyDown', ...)` — mesma classe de API documentada-mas-nunca-exercitada que `getCurrentCrosshairRef`) que chama `ctx.sp.browser.executeJavaScript` direto pra uma nova função `window.openInteractionMenuFromCrosshair(payload)` na CEF — **não** via `mp.events.add('interaction:open', ...)`, que está comprovadamente morto. Exige também tornar `INTERACTION_TARGET_TYPE` (hoje constante fixa `'player'` em `index.html`) dinâmico por chamada.

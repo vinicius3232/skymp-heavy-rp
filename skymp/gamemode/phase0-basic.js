@@ -65,6 +65,7 @@ const voipService   = require(path.join(gamemodeDir, 'voip-service'));
 const voiceEndpoint = require(path.join(gamemodeDir, 'core', 'voice', 'voice-endpoint'));
 const soulService   = require(path.join(gamemodeDir, 'soul-service'));
 const nametagService = require(path.join(gamemodeDir, 'nametag-service'));
+const cellPersistenceService = require(path.join(gamemodeDir, 'cell-persistence-service'));
 const faunaCensus   = require(path.join(gamemodeDir, 'fauna-census'));
 const corpseProbe   = require(path.join(gamemodeDir, 'corpse-probe'));
 const tradeService  = require(path.join(gamemodeDir, 'trade-service'));
@@ -331,6 +332,81 @@ moduleRegistry.register({
   }
 });
 
+// LAB: Persistência de estado de célula (`/dropitem`, `/pegaritem`) —
+// promovido de Pós-Alfa em 21/08/2026, ver
+// HEAVY_RP_GAMEPLAY_SYSTEMS_BACKLOG.md item 6. Fecha o loop com o Interaction
+// Framework (`world_object.pickup`, alvo `TARGET_TYPES.OBJECT`) — ver o
+// ADENDO no cabeçalho de cell-persistence-service.js para a resposta à §15.
+//
+// ⚠️ Reidratação por polling de célula, e o raycast de crosshair do cliente,
+// nunca foram vistos em jogo — mesma lacuna de nametag/gestos. Sem catálogo
+// de itens do ESM neste projeto, category/value do drop são argumentos
+// explícitos do comando, não inferidos. `dependencies: ['interaction']`
+// porque `registerPickupInteraction` roda no `initialize()` e precisa do
+// framework pronto — a ordenação topológica do module-registry garante isso.
+moduleRegistry.register({
+  id: 'cell-persistence',
+  enabledBy: 'ENABLE_CELL_PERSISTENCE_SERVICE',
+  phase: 'lab',
+  dependencies: ['interaction'],
+  commands: [{
+    name: '/dropitem',
+    handler: (actorId, args) => {
+      const parts = (args || '').trim().split(/\s+/);
+      const baseId = parseInt(parts[0], 16);
+      const count = parseInt(parts[1], 10) || 1;
+      const category = parts[2] || 'misc';
+      const value = parseInt(parts[3], 10) || 0;
+
+      const charData = commands.getActiveCharacterData(actorId);
+      if (!charData) return;
+      if (!Number.isInteger(baseId) || baseId <= 0) {
+        commands.sendNotification(actorId, 'Uso: /dropitem <baseId hex> <quantidade> [categoria] [valor]');
+        return;
+      }
+
+      cellPersistenceService
+        .recordDrop({ actorId, characterId: charData.characterId, baseId, count, category, value })
+        .then((resultado) => {
+          if (!resultado.ok) commands.sendNotification(actorId, `Não foi possível largar o item (${resultado.reason}).`);
+        })
+        .catch((err) => console.error('[cell-persistence] Falha no /dropitem:', err.message));
+    },
+    description: 'Larga um item no mundo, persistido pelo servidor',
+    usage: '/dropitem <baseId hex> <quantidade> [categoria] [valor]'
+  }, {
+    // Caminho utilizável hoje: a CEF já fala `interaction:*`, mas nada
+    // dispara o gatilho que abre o menu (`interaction:open` é listener morto
+    // — ver INTERACTION_FRAMEWORK.md §14, corrigido 21/08/2026). Mesmo padrão
+    // de `trade-service`, cujos comandos de chat são a interface inteira.
+    name: '/pegaritem',
+    handler: (actorId, args) => {
+      const id = parseInt((args || '').trim(), 10);
+      const charData = commands.getActiveCharacterData(actorId);
+      if (!charData) return;
+      if (!Number.isInteger(id) || id <= 0) {
+        commands.sendNotification(actorId, 'Uso: /pegaritem <id>');
+        return;
+      }
+
+      cellPersistenceService
+        .removeObject(id, actorId, charData.characterId)
+        .then((resultado) => {
+          commands.sendNotification(actorId, resultado.ok ? 'Você pegou o item.' : `Não foi possível pegar o item (${resultado.reason}).`);
+        })
+        .catch((err) => console.error('[cell-persistence] Falha no /pegaritem:', err.message));
+    },
+    description: 'Pega um item persistido do chão pelo seu id',
+    usage: '/pegaritem <id>'
+  }],
+  initialize: async () => {
+    cellPersistenceService.initCellPersistenceService({ registerTargetResolver: interactionTargets.registerResolver });
+  },
+  shutdown: async () => {
+    cellPersistenceService.shutdownCellPersistenceService();
+  }
+});
+
 // LAB: Instrumentos de observação da Fase 0 para a questão de mobs hostis.
 //
 // Não são mecânica e não viram mecânica. São as Peças 1 e 2 da §16 do
@@ -530,6 +606,18 @@ if (typeof mp !== "undefined") {
     isVisibleByOwner: true,
     isVisibleByNeighbors: false,
     updateOwner: nametagService.SNIPPET_DO_CLIENTE,
+    updateNeighbor: ''
+  });
+
+  // Raycast de crosshair para o menu contextual (Tarefa 5) — mesmo motivo do
+  // nametag acima: o alvo sob a mira é a única coisa aqui que só o cliente
+  // sabe. Empurra pra CEF via `window.handleWorldObjectCrosshair`; a CEF ainda
+  // não lê isso (INTERACTION_FRAMEWORK.md §14) — ver o ADENDO em
+  // cell-persistence-service.js.
+  mp.makeProperty('worldObjectCrosshair', {
+    isVisibleByOwner: true,
+    isVisibleByNeighbors: false,
+    updateOwner: cellPersistenceService.CROSSHAIR_SNIPPET_DO_CLIENTE,
     updateNeighbor: ''
   });
 
