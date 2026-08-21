@@ -147,44 +147,66 @@ async function checkWhitelist(userId, profileId, actorId) {
       }
     }
 
-    // 4. Verificar se possui personagem ativo e aprovado
-    // ORDER BY + LIMIT 1: hoje só existe 1 personagem approved por conta (a
-    // aplicação bloqueia reenvio com pendente/aprovada ativa), mas sem isso
-    // a query pega uma linha arbitrária do banco se isso mudar no futuro
-    // (ex: suporte a personagem principal + alt).
-    let charRows = await db.query(
-      `SELECT * FROM characters WHERE account_id = ? AND status = 'approved' ORDER BY id DESC LIMIT 1`,
+    // 4. Personagem: resolve pelo bind da game_session (AUTH-003/CHR-001) —
+    // não mais "o approved mais recente". A conta prova quem é a PESSOA; a
+    // sessão, gravada por apps/game-api no momento do join da fila, fixa
+    // qual PERSONAGEM. Ver migration-v19-game-session-character-bind.sql.
+    let character = null;
+    const boundRows = await db.query(
+      `SELECT c.* FROM game_sessions gs
+        JOIN characters c ON c.id = gs.character_id
+       WHERE gs.account_id = ? AND gs.character_id IS NOT NULL
+         AND gs.revoked_at IS NULL AND gs.expires_at > NOW()
+       ORDER BY gs.last_resolved_at DESC, gs.id DESC LIMIT 1`,
       [account.id]
     );
 
-    let character = null;
-    if (charRows.length === 0) {
-      if (allowLocalAutoWhitelist(profileId)) {
-        const firstName = profileId === 2 ? 'Jarl' : 'Jon';
-        const lastName = profileId === 2 ? 'Balgruuf' : 'Battleborn';
-        console.log(`[whitelist] Auto-creating approved character: ${firstName} ${lastName}...`);
-        const insertChar = await db.query(
-          `INSERT INTO characters (account_id, first_name, last_name, status, pos_x, pos_y, pos_z, angle_z, cell_id) 
-           VALUES (?, ?, ?, 'approved', 35, -165, -189, 180, '0x162e2')`,
-          [account.id, firstName, lastName]
-        );
-        character = {
-          id: insertChar.insertId,
-          first_name: firstName,
-          last_name: lastName,
-          pos_x: 35,
-          pos_y: -165,
-          pos_z: -189,
-          angle_z: 180,
-          cell_id: '0x162e2'
-        };
-      } else {
-        console.log(`[whitelist] User ${userId} has no approved characters. Kicking...`);
-        if (typeof mp !== 'undefined') mp.kick(userId);
-        return false;
-      }
+    if (boundRows.length > 0) {
+      character = boundRows[0];
     } else {
-      character = charRows[0];
+      // Rede de segurança de migração, não um segundo jeito permanente de
+      // escolher personagem: cobre (a) sessões emitidas antes da
+      // migration-v19 (sem bind, expiram sozinhas em horas) e (b) o
+      // laboratório local, que nunca tem game_sessions porque é 100% offline.
+      let charRows = await db.query(
+        `SELECT * FROM characters WHERE account_id = ? AND status = 'approved' ORDER BY id DESC LIMIT 1`,
+        [account.id]
+      );
+
+      if (charRows.length === 0) {
+        if (allowLocalAutoWhitelist(profileId)) {
+          const firstName = profileId === 2 ? 'Jarl' : 'Jon';
+          const lastName = profileId === 2 ? 'Balgruuf' : 'Battleborn';
+          console.log(`[whitelist] Auto-creating approved character: ${firstName} ${lastName}...`);
+          const insertChar = await db.query(
+            `INSERT INTO characters (account_id, first_name, last_name, status, pos_x, pos_y, pos_z, angle_z, cell_id)
+             VALUES (?, ?, ?, 'approved', 35, -165, -189, 180, '0x162e2')`,
+            [account.id, firstName, lastName]
+          );
+          character = {
+            id: insertChar.insertId,
+            first_name: firstName,
+            last_name: lastName,
+            pos_x: 35,
+            pos_y: -165,
+            pos_z: -189,
+            angle_z: 180,
+            cell_id: '0x162e2'
+          };
+        } else {
+          console.log(`[whitelist] User ${userId} has no approved characters. Kicking...`);
+          if (typeof mp !== 'undefined') mp.kick(userId);
+          return false;
+        }
+      } else {
+        character = charRows[0];
+        if (!allowLocalAutoWhitelist(profileId)) {
+          console.warn(
+            `[whitelist] Conta ${account.id} sem game_session vinculada (AUTH-003) — ` +
+            'usando o fallback de migração. Se isto persistir fora de uma janela de deploy, o bind em apps/game-api está quebrado.'
+          );
+        }
+      }
     }
 
     console.log(`[whitelist] Whitelist check passed! Welcome, ${character.first_name} ${character.last_name}`);

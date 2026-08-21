@@ -77,11 +77,13 @@ Transforma launch ticket em admissão e game session. É autoridade temporária 
 
 ## Security blockers
 
-### SECURITY-BLOCKER AUTH-01 — profileId redundante controlado pelo cliente
+### SECURITY-BLOCKER AUTH-01 — profileId redundante controlado pelo cliente. RESOLVIDO em 21/08/2026 (junto de AUTH-003)
 
-`apps/launcher/electron/main.ts` grava `gameData.profileId` derivado dos últimos oito dígitos do Discord. Com `offlineMode=false`, espera-se que a engine ignore esse valor. Se produção/staging regredir para offline mode, o jogador escolhe sua identidade alterando um JSON local.
+`apps/launcher/electron/main.ts` gravava `gameData.profileId` derivado dos últimos oito dígitos do Discord. Passou a fazer `delete clientSettings.gameData.profileId` — o fluxo online nunca precisou desse valor (a engine resolve contra a Master API), e ele só existia como risco residual caso `offlineMode` regredisse para `true` em produção.
 
-**Gate:** CI/config doctor deve reprovar `offlineMode=true` fora de ambiente local; o launcher não deve gravar profileId no fluxo online.
+**Evidência:** `skymp/gamemode/core/auth-boundary.test.js` — teste invertido de "documenta o profileId legado" para "AUTH-01 fechado: launcher não escreve mais profileId legado", com `assert.doesNotMatch`.
+
+CI/config doctor continuar reprovando `offlineMode=true` fora de ambiente local segue valendo como defesa em profundidade — este fechamento remove a superfície, não substitui aquele gate.
 
 ### SECURITY-BLOCKER AUTH-02 — semântica divergente de profileId (**RESOLVIDO em 2026-08-12**)
 
@@ -89,19 +91,25 @@ O Master API retorna `accountId` e a whitelist agora consulta `accounts.id`. Acc
 
 **Evidência:** online `profileId === accountId`; `whitelist.test.js` cobre a consulta por `accounts.id`. Discord ID é atributo, não chave de gameplay.
 
-### SECURITY-BLOCKER AUTH-03 — personagem não vinculado à sessão
+### SECURITY-BLOCKER AUTH-03 — personagem não vinculado à sessão. RESOLVIDO em 21/08/2026 (AUTH-003)
 
-Whitelist seleciona `ORDER BY id DESC LIMIT 1` entre personagens aprovados. A sessão autentica conta, mas não fixa slot/personagem. Ao permitir alts, login pode carregar personagem diferente sem uma escolha autoritativa explícita.
+`apps/game-api` resolve e grava `character_id` em `game_sessions` no momento do `/api/queue/join` — junto com o consumo do `launch_grant`, não depois da promoção da fila (`resolveApprovedCharacter`, `migration-v19-game-session-character-bind.sql`). `whitelist.js` passou a ler o personagem vinculado via `game_sessions JOIN characters`, não mais `ORDER BY id DESC LIMIT 1`.
 
-**Gate:** CHR-001/002 adiciona seleção/bind server-side; até lá manter cardinalidade efetiva de um approved ativo por conta.
+Até CHR-002 existir, cardinalidade de um `approved` por conta continua sendo o que torna o bind automático seguro: `resolveApprovedCharacter` recusa (não adivinha) se encontrar mais de um. Sessões emitidas antes desta migration ficam sem bind e caem num fallback que reproduz o comportamento antigo, com aviso em log — rede de segurança de migração, não uma segunda forma permanente de escolher personagem; expira sozinha pelo TTL da sessão.
+
+**Evidência:** `apps/game-api/queue.test.js` (bind sobrevive à espera e à promoção), `skymp/gamemode/whitelist.test.js` (bind vence o fallback), `apps/web/server.test.js` (`characterId` na resposta do Master API).
 
 ### SECURITY-BLOCKER AUTH-04 — segredo em URL
 
 URLs aparecem com facilidade em access logs, traces e proxies. Duas ocorrências desta classe foram identificadas.
 
-**AUTH-04a — `masterKey` no path do Master API.** Aberto.
+**AUTH-04a — `masterKey` no path do Master API. RESOLVIDO em 21/08/2026 — via runbook, não via mudança de contrato.**
 
-**Gate:** redaction imediata em observabilidade e ADR para autenticação por header/mTLS ou chave derivada, preservando compatibilidade SkyMP.
+Não dá pra tirar a `masterKey` da URL: `GET /api/servers/:masterKey/sessions/:session` é o formato que o binário do SkyMP chama nativamente, não escolha nossa — mudar exigiria modificar o SkyMP compilado, proibido pela política do projeto. Auditoria confirmou que `apps/web/server.js` não tem middleware de log de acesso (`morgan` ou equivalente) e nunca escreve a URL completa em log próprio — o vazamento possível é inteiramente de infraestrutura (proxy reverso/CDN), fora deste repositório.
+
+**Evidência:** nenhuma ocorrência de log de request/URL completa em `apps/web/server.js`; comparação por `safeEquals` (tempo constante); 404 uniforme para `masterKey` errada e sessão desconhecida (não diferencia os dois casos pra quem está adivinhando).
+
+**Fechamento:** runbook de redação de log de proxy + rotação de `MASTER_KEY` em [`OPERATIONS.md` §6.1](OPERATIONS.md#61-master_key-viaja-na-url--auth-04a). Rotação de rotina (cadência) segue como decisão de operação pendente, não bloqueia o fechamento do blocker de código.
 
 **AUTH-04b — ticket de fila na query string. RESOLVIDO em 2026-08-13.**
 
@@ -122,7 +130,7 @@ Correção: a rota virou `POST /api/queue/status` lendo `(req.body || {}).ticket
 3. Banco guarda somente hashes de launch/game tickets.
 4. Resposta obsoleta de whitelist não toca uma reconexão.
 5. Configuração staging/production deve ter `offlineMode=false`.
-6. Launcher online deve remover profileId legado antes da Fase AUTH-003.
+6. Launcher online deve remover profileId legado antes da Fase AUTH-003. **Feito em 21/08/2026.**
 7. Staff role é resolvido por accountId server-side e removido no disconnect.
 8. Nenhuma credencial viaja em query string ou path — coberto para a fila por `server.http.test.js` (AUTH-04b); o `masterKey` (AUTH-04a) segue descoberto.
 

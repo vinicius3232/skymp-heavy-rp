@@ -1,6 +1,8 @@
 # CHR-001 — Modelo Account, Session, Character e Identity
 
-Status: design, sem migration ou runtime. Data: 2026-08-12.
+Status: bind Session↔Character **IMPLEMENTADO em 21/08/2026** (`migration-v19-game-session-character-bind.sql`, AUTH-003). Data original do design: 2026-08-12.
+
+O bind automático descrito abaixo (§"Desenho de persistência futuro") foi simplificado: em vez de `audience`/`kind`/`nonce` na tabela, o `kind` já vive no prefixo da credencial opaca (AUTH-002) e a cardinalidade "um approved por conta" tornou a seleção explícita desnecessária por enquanto — `apps/game-api` resolve o personagem sozinho no join da fila. Isto NÃO é CHR-002: continua sem seleção de personagem pelo jogador, sem suporte a múltiplos approved, e sem retirada/troca de personagem em sessão ativa. Ver `resolveApprovedCharacter` em `apps/game-api/server.js` para onde a seleção explícita entra quando CHR-002 chegar — o ponto do bind (join da fila) não muda, só a origem do `characterId`.
 
 ## Responsabilidades
 

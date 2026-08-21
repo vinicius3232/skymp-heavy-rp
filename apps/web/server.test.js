@@ -44,7 +44,8 @@ process.env.SESSION_SECRET = 'test-session-secret';
 process.env.DISCORD_CLIENT_ID = 'test-client-id';
 process.env.DISCORD_CLIENT_SECRET = 'test-client-secret';
 
-const { app, validateApplication, hashTicket } = require(path.join(__dirname, 'server.js'));
+const { app, validateApplication, issueLaunchTicket } = require(path.join(__dirname, 'server.js'));
+const credential = require(path.join(__dirname, '..', '..', 'skymp', 'gamemode', 'core', 'opaque-credential'));
 
 Module._load = realLoad;
 
@@ -188,12 +189,17 @@ describe('troca de OAuth do launcher', () => {
 });
 
 describe('ticket de lançamento', () => {
-  test('guarda hash, nunca o token em claro', () => {
-    const token = 'a'.repeat(64);
-    const hash = hashTicket(token);
-    assert.equal(hash.length, 64);
-    assert.notEqual(hash, token);
-    assert.equal(hashTicket(token), hash, 'o hash precisa ser determinístico');
+  test('issueLaunchTicket grava hash, nunca o token em claro', async () => {
+    queryLog.length = 0;
+    queryHandler = () => [];
+    const token = await issueLaunchTicket(42, '123456789', '127.0.0.1');
+
+    assert.equal(credential.parse(token)?.kind, 'launch_grant', 'o token emitido precisa ser um launch_grant opaco válido');
+
+    const insert = queryLog.find((q) => /INSERT INTO launch_tickets/i.test(q.sql));
+    assert.ok(insert, 'deveria ter gravado o ticket');
+    assert.equal(insert.params[0], credential.hash(token), 'o banco guarda o hash, não o token');
+    assert.notEqual(insert.params[0], token, 'o token em claro não pode ir pro banco');
   });
 });
 
@@ -287,7 +293,7 @@ describe('master API de sessão (contrato do SkyMP)', () => {
   // skymp_config.json — ele pergunta aqui quem é o dono da sessão, e o `id`
   // que respondermos vira o profileId do gamemode.
   const MASTER_KEY = 'chave-do-servidor-de-teste';
-  const SESSION = 'b'.repeat(64);
+  const SESSION = credential.generate('game_session');
 
   test('masterKey errada responde 404, não 403', async () => {
     // 404 e não 403 de propósito: não confirmamos a existência da chave certa
@@ -311,10 +317,18 @@ describe('master API de sessão (contrato do SkyMP)', () => {
     assert.equal(queryLog.filter(q => /game_sessions/i.test(q.sql)).length, 0);
   });
 
-  test('sessão válida responde no formato que o SkyMP espera', async () => {
+  test('token de outro kind (launch_grant) é rejeitado sem ir ao banco', async () => {
+    queryLog.length = 0;
+    const launchGrant = credential.generate('launch_grant');
+    const res = await get(`/api/servers/${MASTER_KEY}/sessions/${launchGrant}`);
+    assert.equal(res.status, 404);
+    assert.equal(queryLog.filter(q => /game_sessions/i.test(q.sql)).length, 0, 'kind errado nunca deveria consultar o banco');
+  });
+
+  test('sessão válida responde no formato que o SkyMP espera, com characterId aditivo', async () => {
     queryHandler = (sql) => {
-      if (/SELECT id, account_id, discord_id FROM game_sessions/i.test(sql)) {
-        return [{ id: 7, account_id: 42, discord_id: '123456789' }];
+      if (/SELECT id, account_id, character_id, discord_id FROM game_sessions/i.test(sql)) {
+        return [{ id: 7, account_id: 42, character_id: 501, discord_id: '123456789' }];
       }
       return [];
     };
@@ -323,14 +337,26 @@ describe('master API de sessão (contrato do SkyMP)', () => {
     assert.equal(res.status, 200);
 
     const body = await res.json();
-    // A forma é ditada pelo SkyMP (systems/login.ts lê `data.user.id`),
-    // não por nós — se isto mudar, o login inteiro para.
+    // A forma de `user` é ditada pelo SkyMP (systems/login.ts lê `data.user.id`),
+    // não por nós — se isto mudar, o login inteiro para. `characterId` é campo
+    // aditivo (AUTH-003/CHR-001): o SkyMP nativo ignora o que não conhece.
     assert.equal(body.user.id, 42, 'user.id vira o profileId do gamemode');
     assert.equal(body.user.discordId, '123456789');
+    assert.equal(body.characterId, 501);
+  });
+
+  test('sessão sem bind (emitida antes da migration v19) responde characterId nulo, não erro', async () => {
+    queryHandler = (sql) => /SELECT id, account_id, character_id, discord_id FROM game_sessions/i.test(sql)
+      ? [{ id: 7, account_id: 42, character_id: null, discord_id: '123456789' }]
+      : [];
+
+    const res = await get(`/api/servers/${MASTER_KEY}/sessions/${SESSION}`);
+    assert.equal(res.status, 200);
+    assert.equal((await res.json()).characterId, null);
   });
 
   test('a consulta exige sessão não revogada e não expirada', async () => {
-    queryHandler = () => [{ id: 1, account_id: 1, discord_id: 'x' }];
+    queryHandler = () => [{ id: 1, account_id: 1, character_id: null, discord_id: 'x' }];
     await get(`/api/servers/${MASTER_KEY}/sessions/${SESSION}`);
 
     const q = queryLog.find(q => /FROM game_sessions/i.test(q.sql));
@@ -340,17 +366,17 @@ describe('master API de sessão (contrato do SkyMP)', () => {
   });
 
   test('guarda hash, nunca o token em claro', async () => {
-    queryHandler = () => [{ id: 1, account_id: 1, discord_id: 'x' }];
+    queryHandler = () => [{ id: 1, account_id: 1, character_id: null, discord_id: 'x' }];
     await get(`/api/servers/${MASTER_KEY}/sessions/${SESSION}`);
 
     const q = queryLog.find(q => /FROM game_sessions/i.test(q.sql));
     assert.notEqual(q.params[0], SESSION, 'o token em claro não pode ir pro banco');
-    assert.equal(q.params[0], hashTicket(SESSION));
+    assert.equal(q.params[0], credential.hash(SESSION));
   });
 
   test('contabiliza a resolução', async () => {
     queryHandler = (sql) => /SELECT id, account_id/i.test(sql)
-      ? [{ id: 7, account_id: 42, discord_id: 'x' }] : [];
+      ? [{ id: 7, account_id: 42, character_id: null, discord_id: 'x' }] : [];
     await get(`/api/servers/${MASTER_KEY}/sessions/${SESSION}`);
 
     // resolve_count alto é sinal de sessão compartilhada entre máquinas.
