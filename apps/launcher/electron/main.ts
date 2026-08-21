@@ -7,6 +7,11 @@ import https from 'https';
 import crypto from 'crypto';
 import { URL } from 'url';
 import { parsePluginsTxt, parsePluginHeader, compareMods, analyzePlugins, parseCccTxt, analyzeCreationClub } from './parity.mjs';
+import {
+  parseVoiceManifest, decideVoiceAction, verifyHash, helperArgs,
+  voiceConfigForClient, shutdownOrder, sanitizeVoicePreferences,
+  VOICE_STAMP_FILENAME, VOICE_INSTALL_DIR, VOICE_HELPER_EXE
+} from './voice-dist.mjs';
 
 // ─── Constants & Env ───
 // Estes valores são substituídos em tempo de build pelo `define` do
@@ -37,7 +42,20 @@ type LauncherConfig = {
     height?: number;
     mode?: 'borderless' | 'windowed' | 'fullscreen';
   };
+  /** Preferências de máquina. Nunca credencial, nunca estado de jogo. */
+  voice?: ReturnType<typeof sanitizeVoicePreferences>;
 };
+
+/**
+ * O processo do `voice-helper.exe` desta execução.
+ *
+ * Módulo, e não por-janela, porque o desligamento precisa alcançá-lo de todos os
+ * caminhos de saída — fechar a janela, `kill-game`, e `before-quit`. Um helper
+ * que sobrevive ao launcher é um processo invisível segurando o microfone.
+ */
+let voiceHelperProcess: ReturnType<typeof spawn> | null = null;
+let voiceControlPort = 0;
+let voicePairingToken = '';
 
 type PluginHeader = {
   masters: string[];
@@ -120,6 +138,26 @@ app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') {
     app.quit();
   }
+});
+
+/**
+ * O helper NÃO pode sobreviver ao launcher.
+ *
+ * Um `voice-helper.exe` órfão é um processo sem janela segurando o microfone
+ * pelo WASAPI — indistinguível, para quem olha o gerenciador de tarefas, de um
+ * gravador. A política de privacidade do projeto proíbe captura invisível, e
+ * esta linha é onde ela é cumprida no caminho mais provável: o jogador fechar o
+ * launcher e ir embora.
+ *
+ * `event.preventDefault()` porque `stopVoiceHelper` é assíncrono e o `quit`
+ * padrão não esperaria por ele.
+ */
+let saindo = false;
+app.on('before-quit', (event) => {
+  if (saindo) return;
+  saindo = true;
+  event.preventDefault();
+  stopVoiceHelper().finally(() => app.quit());
 });
 
 app.on('activate', () => {
@@ -571,6 +609,146 @@ function modsManifestUrl() {
   return DIST_REPO ? `https://github.com/${DIST_REPO}/releases/download/mods/mods-dist.json` : '';
 }
 
+// ─── Voz ───────────────────────────────────────────────────────────────────
+//
+// A decisão de o QUE fazer vive em `voice-dist.mjs`, sem I/O e coberta por
+// teste. O que está aqui é só o efeito: disco, rede, processo. A divisão é a
+// mesma do `parity.mjs`, e existe porque nada disto seria testável dentro de um
+// `ipcMain.handle` que precisa de um Electron, um servidor e um jogo abertos.
+
+function voiceManifestUrl() {
+  return DIST_REPO ? `https://github.com/${DIST_REPO}/releases/download/voice/voice-dist.json` : '';
+}
+
+function voiceHelperPath(gamePath: string) {
+  return path.join(gamePath, ...VOICE_INSTALL_DIR.split('/'), VOICE_HELPER_EXE);
+}
+
+function readVoicePreferences(): ReturnType<typeof sanitizeVoicePreferences> {
+  return sanitizeVoicePreferences(readLauncherConfig().voice);
+}
+
+/**
+ * Uma porta de loopback livre para o canal de controle do helper.
+ *
+ * Pedida ao SO (porta 0) e devolvida, em vez de um número fixo: uma porta fixa
+ * colide com qualquer outra coisa que já a tenha, e a colisão apareceria como
+ * "a voz não funciona nesta máquina" — o sintoma mais caro de diagnosticar.
+ */
+function pickFreeLoopbackPort(): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const probe = http.createServer();
+    probe.on('error', reject);
+    probe.listen(0, '127.0.0.1', () => {
+      const addr = probe.address();
+      const port = typeof addr === 'object' && addr ? addr.port : 0;
+      probe.close(() => (port ? resolve(port) : reject(new Error('sem porta livre'))));
+    });
+  });
+}
+
+/**
+ * Mata o helper. Idempotente — `stop` num processo já morto é sucesso.
+ *
+ * Chamado de todos os caminhos de saída porque o helper segura o microfone pelo
+ * WASAPI: deixá-lo vivo depois do jogo é um microfone aberto que ninguém vê.
+ */
+function stopVoiceHelper(): Promise<void> {
+  return new Promise((resolve) => {
+    const proc = voiceHelperProcess;
+    voiceHelperProcess = null;
+    voiceControlPort = 0;
+    voicePairingToken = '';
+    if (!proc || proc.killed || proc.exitCode !== null) {
+      // Rede de segurança: um helper órfão de uma execução anterior (launcher
+      // fechado à força, crash) não seria alcançado pelo handle acima.
+      exec(`taskkill /F /IM "${VOICE_HELPER_EXE}"`, { windowsHide: true }, () => resolve());
+      return;
+    }
+    try { proc.kill(); } catch {}
+    exec(`taskkill /F /T /PID ${proc.pid}`, { windowsHide: true }, () => resolve());
+  });
+}
+
+/**
+ * Sobe o helper e devolve o que a CEF precisa saber para entregar o ticket.
+ *
+ * **Nunca lança.** Voz que não sobe é voz ausente, e voz ausente não pode
+ * impedir alguém de entrar no jogo — é a mesma regra do gateway do gamemode,
+ * aplicada ao lado do cliente.
+ */
+async function startVoiceHelper(gamePath: string): Promise<{ started: boolean; reason: string }> {
+  await stopVoiceHelper();
+
+  const prefs = readVoicePreferences();
+  if (!prefs.enabled) return { started: false, reason: 'o jogador desligou a voz nas preferências' };
+
+  const exe = voiceHelperPath(gamePath);
+  if (!fs.existsSync(exe)) return { started: false, reason: 'voice-helper.exe não está instalado' };
+
+  try {
+    voiceControlPort = await pickFreeLoopbackPort();
+    // Novo a cada execução, só em memória e no config local. É o que impede
+    // qualquer outro processo da máquina de mandar um ticket ao helper.
+    voicePairingToken = crypto.randomBytes(24).toString('hex');
+
+    const args = helperArgs({
+      controlPort: voiceControlPort,
+      pairingToken: voicePairingToken,
+      parentPid: process.pid
+    });
+    const proc = spawn(exe, args, {
+      cwd: path.dirname(exe),
+      windowsHide: true,
+      stdio: 'ignore',
+      // `detached: false` para o helper não ganhar console próprio. Ele NÃO
+      // basta para matar o helper junto no Windows — quem faz isso é a guarda
+      // de `--parent-pid`, ver `helperArgs`.
+      detached: false
+    });
+
+    let saidaPrecoce: number | null = null;
+    proc.on('exit', (code) => {
+      saidaPrecoce = code === null ? -1 : code;
+      if (voiceHelperProcess === proc) voiceHelperProcess = null;
+    });
+    proc.on('error', () => { if (voiceHelperProcess === proc) voiceHelperProcess = null; });
+    voiceHelperProcess = proc;
+
+    // `spawn` só falha se o executável não puder ser criado. Um helper que sobe
+    // e MORRE em seguida — argumento que ele não entende (saída 2), porta de
+    // controle ocupada por um órfão (saída 1) — passava por aqui como sucesso, e
+    // o launcher escrevia no config do jogo uma URL de controle que ninguém
+    // estava escutando. O sintoma chegava horas depois e a três camadas de
+    // distância: "digitei /voz e não aconteceu nada".
+    //
+    // Foi exatamente o que aconteceu até 2026-08-14: os argumentos deste
+    // `helperArgs` não existiam no `main.cpp`, e o helper saía com 2 em todas as
+    // execuções sem que nada aqui notasse.
+    //
+    // 400 ms é folga para o processo abrir a porta e falhar se for falhar, sem
+    // atrasar de forma perceptível a abertura do jogo.
+    await new Promise((r) => setTimeout(r, 400));
+    if (saidaPrecoce !== null) {
+      const codigo = saidaPrecoce;
+      voiceControlPort = 0;
+      voicePairingToken = '';
+      return {
+        started: false,
+        reason: codigo === 2
+          ? 'o helper recusou os argumentos (saída 2) — launcher e voice-helper.exe estão em versões incompatíveis'
+          : `o helper encerrou logo após subir (saída ${codigo})`
+      };
+    }
+
+    return { started: true, reason: `helper iniciado na porta ${voiceControlPort}` };
+  } catch (e: any) {
+    voiceControlPort = 0;
+    voicePairingToken = '';
+    return { started: false, reason: `falha ao iniciar o helper: ${e && e.message}` };
+  }
+}
+
 function crashlogDirs() {
   const skseDir = path.join(app.getPath('documents'), 'My Games', 'Skyrim Special Edition', 'SKSE');
   return [skseDir, path.join(skseDir, 'Crashlogs')];
@@ -999,7 +1177,13 @@ ipcMain.handle('sync-loadorder', async (_event, folderPath, serverLoadOrder) => 
 ipcMain.handle('is-game-running', async () => isGameRunning());
 
 ipcMain.handle('kill-game', async () => {
-  await killGameProcesses();
+  // A ordem vem de `shutdownOrder()` e não é arbitrária: o helper segura o
+  // microfone, e matar o jogo primeiro deixaria uma janela — curta, mas real —
+  // com o jogo fechado e o microfone ainda aberto.
+  for (const alvo of shutdownOrder()) {
+    if (alvo === 'voice-helper') await stopVoiceHelper();
+    else await killGameProcesses();
+  }
   return true;
 });
 
@@ -1055,6 +1239,88 @@ ipcMain.handle('install-client-update', async (_event, gamePath) => {
     return { success: false, error: e.message };
   }
 });
+
+ipcMain.handle('check-voice-update', async (_event, gamePath) => {
+  const prefs = readVoicePreferences();
+  const raw = DIST_REPO ? await httpGetJson(voiceManifestUrl()).catch(() => null) : null;
+  const parsed = parseVoiceManifest(raw);
+  const decision = decideVoiceAction({
+    parsed,
+    installedVersion: gamePath ? readStamp(gamePath, VOICE_STAMP_FILENAME) : null,
+    exePresent: gamePath ? fs.existsSync(voiceHelperPath(gamePath)) : false,
+    clientVersion: gamePath ? readStamp(gamePath, CLIENT_VERSION_FILENAME) : null,
+    voiceEnabled: prefs.enabled
+  });
+  return {
+    ...decision,
+    updateAvailable: decision.action === 'install' || decision.action === 'update' || decision.action === 'reinstall',
+    installedVersion: gamePath ? readStamp(gamePath, VOICE_STAMP_FILENAME) : null
+  };
+});
+
+ipcMain.handle('install-voice-update', async (_event, gamePath) => {
+  if (!gamePath) return { success: false, error: 'Caminho do jogo invalido.' };
+  if (await isGameRunning()) return { success: false, gameRunning: true, error: 'O jogo esta aberto. Feche antes de atualizar a voz.' };
+  if (!DIST_REPO) return { success: false, error: 'VITE_GITHUB_DIST_REPO nao configurado.' };
+
+  const send = (phase: string, percent: number) => {
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('update-progress', { phase, percent });
+  };
+  const tmpZip = path.join(app.getPath('temp'), 'skymp_voice_update.zip');
+  try {
+    const parsed = parseVoiceManifest(await httpGetJson(voiceManifestUrl()));
+    // Manifesto ruim NAO impede o jogo: a voz simplesmente nao instala. Quem
+    // decide isso e `decideVoiceAction`; aqui so nao se prossegue.
+    if (parsed.ok !== true) return { success: false, error: parsed.reason };
+
+    // O helper precisa estar parado antes de o arquivo ser substituido — no
+    // Windows um .exe em execucao nao pode ser sobrescrito, e a extracao
+    // falharia no meio deixando a instalacao pela metade.
+    await stopVoiceHelper();
+
+    send('download', 0);
+    await downloadToFile(parsed.manifest.downloadUrl, tmpZip, percent => send('download', percent));
+
+    send('verify', 0);
+    const conferencia = verifyHash(parsed.manifest.sha256, await sha256File(tmpZip));
+    if (!conferencia.ok) {
+      try { fs.unlinkSync(tmpZip); } catch {}
+      return { success: false, error: `Integridade da voz: ${conferencia.reason}` };
+    }
+    send('verify', 100);
+
+    const destino = path.join(gamePath, ...VOICE_INSTALL_DIR.split('/'));
+    if (!fs.existsSync(destino)) fs.mkdirSync(destino, { recursive: true });
+    send('extract', 0);
+    await extractZip(tmpZip, destino);
+    send('extract', 100);
+
+    writeStamp(gamePath, VOICE_STAMP_FILENAME, parsed.manifest.voiceVersion);
+    try { fs.unlinkSync(tmpZip); } catch {}
+    return { success: true, version: parsed.manifest.voiceVersion };
+  } catch (e: any) {
+    try { fs.unlinkSync(tmpZip); } catch {}
+    return { success: false, error: e.message };
+  }
+});
+
+ipcMain.handle('get-voice-preferences', async () => readVoicePreferences());
+
+ipcMain.handle('save-voice-preferences', async (_event, raw) => {
+  const config = readLauncherConfig();
+  config.voice = sanitizeVoicePreferences(raw);
+  writeLauncherConfig(config);
+  return config.voice;
+});
+
+/** Diagnóstico do lado do launcher. Sem ticket, sem credencial. */
+ipcMain.handle('get-voice-status', async (_event, gamePath) => ({
+  enabled: readVoicePreferences().enabled,
+  installedVersion: gamePath ? readStamp(gamePath, VOICE_STAMP_FILENAME) : null,
+  exePresent: gamePath ? fs.existsSync(voiceHelperPath(gamePath)) : false,
+  helperRunning: voiceHelperProcess !== null && voiceHelperProcess.exitCode === null,
+  controlPort: voiceControlPort || null
+}));
 
 ipcMain.handle('check-mods-update', async (_event, gamePath) => {
   if (!DIST_REPO) return { updateAvailable: false, error: 'VITE_GITHUB_DIST_REPO nao configurado.' };
@@ -1189,7 +1455,32 @@ ipcMain.handle('launch-game', async (_event, folderPath, ticket) => {
       config.serverAddress = `${SERVER_IP}:${SERVER_PORT}`;
       config.discordId = auth.discordId;
       delete config.profileId;
-      
+
+      // A voz sobe ANTES do jogo, para que a porta de controle e o segredo de
+      // pareamento já estejam no config quando a CEF ler o arquivo. Ao
+      // contrário, o primeiro `/voz` da sessão não teria para onde mandar o
+      // ticket.
+      //
+      // `startVoiceHelper` nunca lança: se a voz não subir, o objeto abaixo diz
+      // `helperRunning: false` e o jogo abre igual. VOICE FAILURE NEVER GAME
+      // FAILURE começa aqui, no lado do cliente.
+      const voz = await startVoiceHelper(folderPath);
+      if (voz.started) {
+        Object.assign(config, voiceConfigForClient({
+          controlPort: voiceControlPort,
+          pairingToken: voicePairingToken,
+          voiceVersion: readStamp(folderPath, VOICE_STAMP_FILENAME),
+          helperRunning: true
+        }));
+      } else {
+        // Sem helper não há canal, e escrever uma URL com porta 0 seria pior que
+        // não escrever nada: a CEF tentaria falar com ela e o erro apareceria
+        // longe daqui. O que fica é a ausência, dita por extenso.
+        config.voice = { helperRunning: false, reason: voz.reason, pushToTalk: true };
+        console.warn('[voice] helper não iniciado:', voz.reason);
+      }
+
+
       const configDir = path.dirname(configPath);
       if (!fs.existsSync(configDir)) fs.mkdirSync(configDir, { recursive: true });
       fs.writeFileSync(configPath, JSON.stringify(config, null, 2));

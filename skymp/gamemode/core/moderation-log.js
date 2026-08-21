@@ -36,7 +36,7 @@ let _avisouQueEstaDesligado = false;
 
 /**
  * @param {object} evento
- * @param {'ban'|'kick'|'permakill'|'whitelist_approve'|'whitelist_reject'|'whitelist_reset'} evento.kind
+ * @param {'ban'|'kick'|'voice_mute'|'permakill'|'whitelist_approve'|'whitelist_reject'|'whitelist_reset'} evento.kind
  * @param {string}  evento.target     quem sofreu a ação (nome do personagem, id)
  * @param {string} [evento.moderator] quem aplicou
  * @param {string} [evento.reason]

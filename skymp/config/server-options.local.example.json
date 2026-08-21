@@ -34,6 +34,29 @@
     "startingGold": 0,
     "logAllTransactions": true
   },
+  "voice": {
+    "_comentario": "Regras de gameplay da voz. Ver docs/technical/SKYVOICE_CORE_ETAPA_3.md secao 4.3. rangeModifier multiplica o alcance do modo (whisper/normal/shout); gainModifier multiplica o volume final. 1 = sem efeito.",
+    "downed": {
+      "canSpeak": true,
+      "rangeModifier": 0.35,
+      "gainModifier": 0.6,
+      "effect": "faint"
+    },
+    "gagged": {
+      "_comentario": "Amordacado e EFEITO, nao mute. gainModifier 0 seria mute com outro nome.",
+      "canSpeak": true,
+      "rangeModifier": 0.3,
+      "gainModifier": 0.4,
+      "effect": "muffled"
+    },
+    "unconscious": { "canHear": false },
+    "dead": { "canHear": false },
+    "effects": {
+      "muffledLowpassHz": 700,
+      "faintLowpassHz": 2400
+    },
+    "spatial": { "enabled": true }
+  },
   "debug": {
     "enablePapyrusDebug": true,
     "enableHotReload": false,

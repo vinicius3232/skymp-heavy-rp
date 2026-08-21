@@ -21,10 +21,13 @@ depois. A arquitetura e o porquê estão em
 
 ## Limitações desta fase (deliberadas)
 
-- **O ticket é passado à mão**, por linha de comando. Não há handoff automático
-  entre o jogo e o helper — é trabalho da Fase 3. Para conseguir ler o ticket
-  durante um teste manual existe um andaime temporário
-  (`VOIP_DEBUG_EXPOSE_TICKET`), descrito em VOICE_NATIVE_HELPER.md §11.
+- ~~**O ticket é passado à mão**, por linha de comando.~~ **Resolvido em
+  14/08/2026.** O helper tem um canal de controle em loopback (`--control-port`
+  + `--pair`) e recebe o ticket por POST, sem passar por humano nem por disco.
+  Ver SKYVOICE_E2E_ETAPA_5.md §3. O modo de linha de comando continua existindo
+  para bancada.
+  **O que ainda falta é o mensageiro:** quem deveria fazer esse POST é a CEF, e
+  o `index.html` ainda não o faz (§4 do mesmo documento).
 - ~~**O helper e a UI do mesmo jogador não coexistem.**~~ **Resolvido em
   07/08/2026.** O `auth` passou a levar `role` (`listener` para a UI, `sender`
   para o helper) e o `voip-service` guarda as duas conexões por ator. O helper
@@ -81,6 +84,14 @@ cmake --build build --config Release
 
 O binário sai em `build/Release/voice-helper.exe`.
 
+Isso também compila dois executáveis de teste, sem depender de miniaudio nem
+de ixwebsocket. Rodam com `ctest` ou direto:
+
+```bash
+build/Release/reframe-10ms-test.exe   # reenquadramento de PCM (20ms -> 10ms)
+build/Release/opus-roundtrip-test.exe # encode/decode Opus com a config de producao
+```
+
 Se alguma port não resolver, **anote o erro exato em VOICE_NATIVE_HELPER.md §8
 antes de trocar de biblioteca** — a decisão de usar `miniaudio` está registrada
 com motivo, e trocá-la em silêncio apagaria o motivo junto.
@@ -105,6 +116,37 @@ mesmo sem usarmos TLS. Corrigido adicionando `bcrypt` ao `target_link_libraries`
 Detalhe em VOICE_NATIVE_HELPER.md §8.3.
 
 ## Rodar
+
+Dois modos, e eles são exclusivos — misturar argumentos dos dois é erro de
+argumento, não uma escolha silenciosa.
+
+### Modo pareado (o que o launcher usa)
+
+```bash
+voice-helper.exe --control-port 51997 --pair <segredo> --ptt --parent-pid <pid do launcher>
+```
+
+| Argumento | Obrigatório | Padrão | O quê |
+|---|---|---|---|
+| `--control-port` | sim | — | porta de loopback do canal de controle |
+| `--pair` | sim | — | segredo desta execução do launcher (≥ 16 chars) |
+| `--control-host` | não | `127.0.0.1` | só aceita loopback; existe para ser explícito |
+| `--pair-ttl` | não | `43200` | validade do pareamento, em segundos |
+| `--ptt` | não | desligado | declara que este cliente é governado por push-to-talk |
+| `--parent-pid` | não | — | o helper sai quando esse processo morrer |
+| `--log-level` | não | `info` | |
+
+Aqui **não se passa ticket**: ele não existe ainda quando o launcher sobe o
+helper. Quem o entrega é a CEF, por:
+
+```bash
+curl -X POST http://127.0.0.1:51997/ticket \
+  -d '{"pair":"<segredo>","actorId":4278194194,"ticket":"<token>","host":"127.0.0.1","port":7778}'
+```
+
+O microfone **só abre depois desse POST**, e fecha quando a sessão cai.
+
+### Modo direto (bancada)
 
 ```bash
 voice-helper.exe --actor-id 0xFF000A12 --ticket 753f03d8fa3c944a4c7b1dff7e7a08fb --host 127.0.0.1 --port 7778
@@ -165,11 +207,20 @@ Roteiro completo do teste e os números medidos: VOICE_NATIVE_HELPER.md §7.
 
 ## Formato do fio
 
-PCM 16-bit little-endian, mono, 48kHz, quadros de 20ms (960 amostras = 1920
-bytes → 2560 chars em base64).
+Áudio de captura: PCM 16-bit little-endian, mono, 48kHz, quadros de 20ms
+(960 amostras = 1920 bytes → 2560 chars em base64). É a partir disso que o
+`main.cpp` codifica em Opus (`OPUS_APPLICATION_VOIP`, 24 kbit/s) antes de
+mandar — o quadro de 960 amostras já é um tamanho nativo do Opus a 48kHz, sem
+reenquadrar. O pacote Opus, tipicamente **muito** menor que 1920 bytes, é que
+vai em base64 no `data` da mensagem, com `"codec":"opus"` junto. Ver
+`VOICE_NATIVE_HELPER.md` §3.
 
-O mesmo formato aparece em três arquivos e os três precisam concordar; divergir
-faz o áudio sair em velocidade errada em vez de falhar limpo:
+`codec` ausente é PCM cru — o formato legado, que o servidor e o `index.html`
+continuam entendendo sem checar versão de ninguém.
+
+O tamanho de amostra/taxa/canal do áudio de captura aparece em três arquivos e
+os três precisam concordar; divergir faz o áudio sair em velocidade errada em
+vez de falhar limpo:
 
 - `src/main.cpp` — `kSampleRate`, `kChannels`, `kFrameMs`
 - `skymp/gamemode/voip-service.js` — `AUDIO_SAMPLE_RATE`, `AUDIO_CHANNELS`, `AUDIO_FRAME_MS`

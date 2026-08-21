@@ -13,48 +13,55 @@
       color: white;
     }
 
-    /* === VOIP HUD === */
-    #voip-hud {
+    /* === HUD DE VOZ ===
+       ─── O que saiu daqui, e por quê ──────────────────────────────────────
+       Até a Etapa 2 havia uma lista `#voip-hud`, canto inferior esquerdo, com
+       um cartão e uma barra de volume POR pessoa em alcance. Numa taverna com
+       oito pessoas isso eram oito cartões animados por cima do jogo, contando
+       ao jogador uma coisa que ele não decide nada com: o ganho aplicado à voz
+       de cada vizinho.
+
+       A instrução da Etapa 3 foi específica sobre o que o HUD deve mostrar —
+       MIC, WHISPER, NORMAL, SHOUT, MUTED, VOICE ERROR — e todos os seis são
+       sobre a SUA voz. Sobrou um chip só.
+
+       O que se perdeu junto: saber quem está falando pela barrinha. Isso passou
+       a ser dito onde já se olha — o personagem, pela animação de fala
+       (`core/voice/voice-speech-animation.js`). Um indicador de fala pertence à
+       cena, não a uma lista no canto. */
+    #voip-chip {
       position: fixed;
-      bottom: 20px;
-      left: 20px;
-      display: flex;
-      flex-direction: column;
-      gap: 6px;
-      z-index: 100;
-    }
-    .voip-peer {
-      display: flex;
+      bottom: 22px;
+      left: 22px;
+      display: none;
       align-items: center;
-      gap: 8px;
-      background: rgba(0,0,0,0.55);
-      border: 1px solid rgba(255,255,255,0.15);
-      border-radius: 20px;
-      padding: 4px 12px 4px 8px;
-      font-size: 13px;
-      transition: opacity 0.3s;
+      gap: 7px;
+      background: rgba(0,0,0,0.5);
+      border: 1px solid rgba(255,255,255,0.12);
+      border-radius: 14px;
+      padding: 3px 11px 3px 8px;
+      font-size: 11px;
+      letter-spacing: 0.6px;
+      color: rgba(232,224,207,0.85);
+      z-index: 100;
+      pointer-events: none;
+      /* Sem sombra, sem borda grossa, sem animação por padrão: um HUD de voz
+         bem-comportado é o que a pessoa esquece que está lá. Só o estado de
+         transmissão pulsa, porque é o único que ela precisa notar sem procurar. */
     }
-    .voip-peer .icon {
-      width: 10px; height: 10px;
-      border-radius: 50%;
-      background: #4caf50;
-      animation: pulse 1.2s infinite;
+    #voip-chip.visivel { display: flex; }
+    #voip-chip .dot {
+      width: 7px; height: 7px; border-radius: 50%;
+      background: rgba(255,255,255,0.35);
+      flex: none;
     }
-    .voip-peer.muted .icon { background: #e53935; animation: none; }
+    #voip-chip.transmitindo .dot { background: #7fc47f; animation: pulse 1.2s infinite; }
+    #voip-chip.mudo .dot { background: #c76a6a; }
+    #voip-chip.erro .dot { background: #c76a6a; }
+    #voip-chip.erro { color: rgba(240,190,190,0.9); }
     @keyframes pulse {
       0%, 100% { opacity: 1; }
       50%       { opacity: 0.4; }
-    }
-    .voip-peer .vol-bar {
-      width: 50px; height: 4px;
-      background: rgba(255,255,255,0.2);
-      border-radius: 2px;
-      overflow: hidden;
-    }
-    .voip-peer .vol-fill {
-      height: 100%;
-      background: #4caf50;
-      transition: width 0.4s;
     }
 
     /* === NAMETAG (POC) ===
@@ -390,8 +397,11 @@
   <span id="voip-status-text">VOIP</span>
 </div>
 
-<!-- HUD de peers falando -->
-<div id="voip-hud"></div>
+<!-- HUD de voz: um chip só, sobre a SUA voz. Ver o comentário no CSS. -->
+<div id="voip-chip">
+  <div class="dot"></div>
+  <span id="voip-chip-text">NORMAL</span>
+</div>
 
 <!-- Nametag do personagem mais proximo (POC) -->
 <div id="nametag"></div>
@@ -505,7 +515,7 @@
     ws: null,
     voiceFatal: false,         // motivo terminal já exibido — ver setStatus/onclose
 
-    // Caminho novo (helper nativo): actorId -> { gainNode, nextPlayTime, volume }.
+    // Caminho novo (helper nativo): actorId -> cadeia de áudio espacial.
     // Mapa separado do `peers` de propósito — ali toda entrada tem um
     // RTCPeerConnection e `removePeer` chama `pc.close()`. Uma fonte de relay não
     // tem `pc`, e enfiá-la no mesmo mapa transformaria cada uso de `peers` num
@@ -515,6 +525,20 @@
 
     audioCtx: null,
     localStream: null,
+
+    // Parâmetros dos efeitos, recebidos UMA vez no `auth_ok`. O servidor é a
+    // autoridade sobre eles (`server-options.voice.effects.*`); estes valores
+    // só valem enquanto o handshake não chega.
+    effectSettings: { muffled: { lowpassHz: 700 }, faint: { lowpassHz: 2400 } },
+
+    // Estado da própria voz, para o chip. Nada aqui decide coisa alguma — o
+    // servidor decide e manda; isto é a cópia que se desenha.
+    transmitting: false,
+    voiceError: null,
+
+    // Contadores de custo, lidos por `window.voiceStats()`. Existem porque a
+    // etapa pediu medição no cliente e ninguém mede o que não conta.
+    audioStats: { chains: 0, panners: 0, filters: 0, framesPlayed: 0, framesDropped: 0, peakChains: 0, underruns: 0 },
     interaction: {
       targetActorId: null,
       sections: [],
@@ -605,8 +629,26 @@
   // O servidor informa host/porta porque este arquivo é estático — sem isso
   // só funcionaria com o jogador na mesma máquina do servidor.
   function connectVoip(actorId, ticket, host, port) {
+    // `/voz` chamado duas vezes sem a primeira ter caído é o caminho mais curto
+    // para ÁUDIO DUPLICADO: o socket antigo continua entregando quadros, o novo
+    // começa a entregar os mesmos, e cada locutor passa a ter duas cadeias
+    // tocando com jitter próprio — que soa como eco e não como bug. Fechar
+    // antes de abrir é o que impede isso, e é responsabilidade do cliente
+    // porque só ele sabe que o socket anterior é dele.
+    if (state.ws) {
+      const anterior = state.ws;
+      state.ws = null;
+      // O handler de close do socket antigo já não pode mexer no estado novo.
+      anterior.onclose = null;
+      anterior.onerror = null;
+      anterior.onmessage = null;
+      try { anterior.close(); } catch { /* já morto */ }
+    }
+    tearDownVoiceAudio();
+
     state.actorId = actorId;
     state.voiceFatal = false; // nova tentativa de /voz — o motivo anterior não vale mais
+    state.voiceError = null;
     state.relayHeard = false; // idem: o chip volta a poder ser corrigido nesta sessão
     const wsUrl = `ws://${host || '127.0.0.1'}:${port || 7778}`;
     state.ws = new WebSocket(wsUrl);
@@ -620,40 +662,104 @@
       await handleSignal(msg);
     };
 
-    state.ws.onerror = () => { if (!state.voiceFatal) setStatus('error', 'VOZ INDISPONÍVEL'); };
+    state.ws.onerror = () => {
+      state.voiceError = 'sinalização';
+      renderVoiceChip();
+      if (!state.voiceFatal) setStatus('error', 'VOZ INDISPONÍVEL');
+    };
 
     // 'VOZ DESCONECTADA' descreve a consequência, não a causa. Quando a
     // sinalização é fechada *por nós* depois de um motivo terminal já exibido
     // (mic bloqueado pelo CEF, ticket recusado), o close chega no tick seguinte
     // e apagava a mensagem específica — o jogador acabava lendo "desconectada",
     // que parece instabilidade de servidor, exatamente o diagnóstico errado.
-    state.ws.onclose = () => { if (!state.voiceFatal) setStatus('error', 'VOZ DESCONECTADA'); };
+    state.ws.onclose = () => {
+      // A sinalização caiu: nenhum quadro vai chegar, e nenhuma rota vai ser
+      // atualizada. Manter as cadeias montadas significaria continuar
+      // processando silêncio para todo mundo que estava perto no instante da
+      // queda — e, na reconexão, montar um segundo conjunto por cima delas.
+      // Áudio duplicado começa exatamente assim.
+      tearDownVoiceAudio();
+      esconderVoiceChip();
+      if (!state.voiceFatal) setStatus('error', 'VOZ DESCONECTADA');
+    };
   }
 
   async function handleSignal(msg) {
     switch (msg.type) {
       case 'auth_ok':
+        // Os parâmetros dos efeitos chegam UMA vez, aqui. Eles vêm do
+        // `server-options` do servidor, e o cliente não tem opinião sobre eles:
+        // um passa-baixa que o jogador escolhesse seria a mordaça que ele
+        // desliga sozinho.
+        if (msg.effects && typeof msg.effects === 'object') {
+          state.effectSettings = msg.effects;
+        }
+        state.voiceError = null;
         setStatus('ok', 'VOZ ATIVA');
+        renderVoiceChip();
         await initMicrophone();
         break;
 
       case 'auth_failed':
         state.voiceFatal = true;
+        state.voiceError = 'ticket recusado';
         setStatus('error', 'FALHA NA VOZ — tente /voz de novo');
+        renderVoiceChip();
         if (state.ws) state.ws.close();
         break;
 
+      case 'voice_mode':
+        // O servidor confirma (ou recusa) o modo. O chip desenha o que o
+        // servidor disse, nunca o que o cliente pediu — foi assim que `'radio'`
+        // conseguiu, na Etapa 1, deixar alguém inaudível com a UI dizendo que
+        // estava tudo bem.
+        if (msg.ok) state.voiceMode = msg.mode;
+        renderVoiceChip();
+        break;
+
+      case 'ptt':
+        state.transmitting = msg.transmitting === true;
+        renderVoiceChip();
+        break;
+
+      case 'voice_speaking':
+        // Alguém em alcance começou/parou de falar. O cliente não decide isto —
+        // o servidor decidiu, com `canSpeak` e com os quadros que chegaram.
+        // Repassado ao gamemode para animação; a UI em si não desenha nada,
+        // porque um indicador de fala pertence ao personagem, não a uma lista.
+        if (typeof mp !== 'undefined' && typeof mp.trigger === 'function') {
+          mp.trigger('cef::voice:speaking', { actorId: msg.actorId, speaking: msg.speaking === true });
+        }
+        break;
+
       case 'proximity_update':
-        // Atualiza os volumes dos peers conforme distancia
+        // Atualiza volume, efeito e DIREÇÃO de cada fonte em alcance.
         for (const p of msg.peers) {
-          if (!state.peers.has(p.actorId)) {
+          // Só abre WebRTC para quem já tem `pc` ou está começando: no caminho
+          // do relay não há peer connection nenhuma, e é esse o caminho que
+          // funciona hoje.
+          if (!state.peers.has(p.actorId) && state.localStream) {
             await initiateCall(p.actorId);
           }
           const peer = state.peers.get(p.actorId);
           if (peer && peer.gainNode) {
             peer.gainNode.gain.setTargetAtTime(p.volume, state.audioCtx.currentTime, 0.1);
           }
-          updatePeerHUD(p.actorId, p.volume, false);
+
+          // A cadeia de relay só é TOCADA se já existir. Criá-la aqui montaria
+          // ganho, panner e filtro para alguém de quem talvez nunca chegue um
+          // quadro — que é exatamente o processamento de áudio inútil que a
+          // etapa manda evitar. Quem cria é o primeiro quadro que chega.
+          const chain = state.relayPeers.get(p.actorId);
+          if (chain) {
+            if (p.volume !== chain.volume) {
+              chain.volume = p.volume;
+              chain.gainNode.gain.setTargetAtTime(p.volume, state.audioCtx.currentTime, 0.1);
+            }
+            if (p.dir) setPannerDirection(chain, p.dir);
+            applyEffect(chain, p.effect);
+          }
         }
         // Remove peers que saíram do alcance
         for (const [id] of state.peers) {
@@ -667,7 +773,6 @@
         for (const [id] of state.relayPeers) {
           if (!msg.peers.find(p => p.actorId === id)) {
             removeRelayPeer(id);
-            removePeerHUD(id);
           }
         }
         break;
@@ -692,7 +797,7 @@
         // Caminho novo: PCM cru vindo do helper nativo, já retransmitido pelo
         // servidor com o volume calculado para *este* ouvinte. Não há WebRTC
         // envolvido — só decodificar e tocar. Ver docs/technical/VOICE_NATIVE_HELPER.md.
-        playRelayFrame(msg.fromActorId, msg.volume, msg.data);
+        playRelayFrame(msg.fromActorId, msg.volume, msg.data, msg.effect, msg.codec);
         break;
 
       case 'peer_left':
@@ -708,7 +813,25 @@
 
   // Jitter buffer: quanto agendar à frente do relógio do AudioContext. Menos que
   // isso e qualquer atraso de rede vira um buraco audível entre quadros de 20ms.
-  const RELAY_JITTER_S = 0.06;
+  //
+  // Fixo em 60ms, este número tinha um custo medido: toda vez que a fonte
+  // atrasava, o underrun pulava para `now + 60ms`, inserindo esse silêncio de
+  // novo — mesmo se o atraso fosse de 1ms. Numa rede com jitter de verdade isso
+  // vira picotamento em vez de degradar suave (`VOICE_NATIVE_HELPER.md` §7).
+  // Por isso virou piso e teto adaptativos por locutor (`chain.jitterS`), não
+  // uma constante: cada `chain` cresce o próprio colchão quando apanha
+  // underrun e encolhe devagar quando fica um tempo sem apanhar. Ver
+  // `getRelayChain` e `playRelayFrame`.
+  const RELAY_JITTER_MIN_S = 0.06;
+  const RELAY_JITTER_MAX_S = 0.24;
+  // Cresce um quadro de 20ms por underrun — rápido o bastante para não levar
+  // vários underruns seguidos até estabilizar.
+  const RELAY_JITTER_GROW_S = 0.02;
+  // Encolhe metade de um quadro depois de uma janela sem underrun nenhum.
+  // Devagar de propósito: encolher rápido demais faria o colchão oscilar toda
+  // vez que a rede tivesse uma rajada de jitter e voltasse ao normal.
+  const RELAY_JITTER_SHRINK_S = 0.01;
+  const RELAY_JITTER_HEALTHY_FRAMES = 250; // ~5s de áudio a 20ms/quadro
 
   // Teto de fila. Se os quadros chegarem mais rápido que o tempo real (rajada
   // depois de um congestionamento), `nextPlayTime` cresce sem limite e a latência
@@ -736,17 +859,172 @@
     return state.audioCtx;
   }
 
+  // ── Pipeline de áudio espacial ────────────────────────────────────────────
+  //
+  //   BufferSource ─► GainNode ─► [BiquadFilter] ─► PannerNode ─► destination
+  //                      │              │               │
+  //                   volume         efeito         direção
+  //                (do servidor)   (mordaça,      (unitário, no
+  //                                 abatido)      referencial do
+  //                                                  ouvinte)
+  //
+  // ─── Duas decisões que o desenho conceitual não fixa ───────────────────────
+  //
+  // **1. O filtro vem ANTES do panner, não depois.** A instrução desenhava
+  // `Panner → Environment Filter → Destination`. Depois do panner o sinal é
+  // estéreo, e o biquad passaria a filtrar dois canais em vez de um — o dobro
+  // do custo, num navegador que é a parte mais apertada deste sistema. Com
+  // `equalpower` o panner é um par de ganhos constantes, então filtrar antes ou
+  // depois dá o MESMO resultado audível. Trocou-se ordem por metade da conta,
+  // sem trocar o som.
+  //
+  // **2. O panner NÃO atenua por distância.** `rolloffFactor = 0` e
+  // `refDistance = maxDistance = 1`, com a fonte sempre a raio 1. A queda por
+  // distância é do servidor e já está no `volume`; deixar o panner aplicar a
+  // dele produziria duas quedas independentes, uma autoritativa e uma não, e o
+  // desvio cresceria com a distância — o disfarce perfeito para uma regra de
+  // jogo quebrada. Ver `core/voice/voice-spatial.js`.
+  //
+  // ─── Compatibilidade com a CEF 108 (Chromium 108.0.5359) ──────────────────
+  //
+  // Tudo aqui existe desde o Chromium 52 ou antes: `createPanner`,
+  // `createBiquadFilter`, `PannerNode.positionX` como `AudioParam`,
+  // `panningModel = 'equalpower'`, `setTargetAtTime`. Deliberadamente FORA:
+  // `AudioContext.setSinkId` (Chromium 110), `AudioWorklet` (existe na 108 mas
+  // exige carregar módulo por URL, o que a origem `file://` deste arquivo
+  // complica), `HRTF` (custo por fonte muito maior que `equalpower`, sem ganho
+  // que se note em fone dentro de um jogo).
+  //
+  // `positionX` mesmo assim é detectado em runtime, com queda para o
+  // `setPosition()` obsoleto: o pin da CEF pode mudar, e um `undefined.value`
+  // aqui silenciaria a voz de todo mundo com um TypeError por quadro.
+
+  /** `equalpower` e não `HRTF`: ver a nota de compatibilidade acima. */
+  const PANNING_MODEL = 'equalpower';
+
   function getRelayChain(actorId) {
     let chain = state.relayPeers.get(actorId);
-    if (!chain) {
-      const ctx = ensureAudioContext();
-      const gainNode = ctx.createGain();
-      gainNode.gain.value = 0; // silencioso até o primeiro volume do servidor
-      gainNode.connect(ctx.destination);
-      chain = { gainNode, nextPlayTime: 0, volume: null };
-      state.relayPeers.set(actorId, chain);
+    if (chain) return chain;
+
+    const ctx = ensureAudioContext();
+
+    const gainNode = ctx.createGain();
+    gainNode.gain.value = 0; // silencioso até o primeiro volume do servidor
+
+    const panner = ctx.createPanner();
+    panner.panningModel = PANNING_MODEL;
+    panner.distanceModel = 'inverse';
+    panner.refDistance = 1;
+    panner.maxDistance = 1;
+    panner.rolloffFactor = 0;   // ← a distância é do servidor. Ver acima.
+    panner.coneInnerAngle = 360; // sem cone: a boca de um jogador não aponta
+    panner.coneOuterAngle = 360; //   para lugar nenhum que este sistema saiba
+    panner.connect(ctx.destination);
+
+    chain = {
+      gainNode,
+      panner,
+      filter: null,       // criado só quando um efeito exigir. Ver `applyEffect`.
+      effect: 'none',
+      nextPlayTime: 0,
+      volume: null,
+      dir: null,
+      level: 0,           // RMS do último quadro — o `audioLevel` do cliente
+      activeSources: 0,
+      // Colchão de jitter deste locutor. Por chain, não global: dois locutores
+      // atrás de redes diferentes não têm por que compartilhar o mesmo jitter.
+      jitterS: RELAY_JITTER_MIN_S,
+      framesSinceUnderrun: 0,
+      // Opus (Fase 2 do formato do fio) — ver `ensureOpusDecoder`. `null` até
+      // o primeiro quadro `codec:"opus"` deste locutor chegar; quem nunca fala
+      // Opus nunca paga o custo de criar um `AudioDecoder`.
+      opusDecoder: null,
+      opusPending: null,
+      opusSeq: 0
+    };
+
+    // Sem efeito, o ganho vai direto ao panner: um nó a menos por locutor.
+    gainNode.connect(panner);
+    setPannerDirection(chain, [0, 0, -1]);
+
+    state.relayPeers.set(actorId, chain);
+    state.audioStats.chains++;
+    state.audioStats.panners++;
+    if (state.audioStats.chains > state.audioStats.peakChains) {
+      state.audioStats.peakChains = state.audioStats.chains;
     }
     return chain;
+  }
+
+  /**
+   * Aponta a fonte. `dir` é unitário no referencial do ouvinte, vindo do
+   * servidor: `+x` direita, `+y` cima, `-z` à frente.
+   */
+  function setPannerDirection(chain, dir) {
+    if (!dir || dir.length < 3) return;
+    const ctx = state.audioCtx;
+    const panner = chain.panner;
+    if (panner.positionX && typeof panner.positionX.setTargetAtTime === 'function') {
+      // Rampa curta: teleportar a fonte de um lado ao outro produz um clique
+      // audível. 40 ms é rápido o bastante para acompanhar quem gira em volta e
+      // lento o bastante para não estalar.
+      panner.positionX.setTargetAtTime(dir[0], ctx.currentTime, 0.04);
+      panner.positionY.setTargetAtTime(dir[1], ctx.currentTime, 0.04);
+      panner.positionZ.setTargetAtTime(dir[2], ctx.currentTime, 0.04);
+    } else if (typeof panner.setPosition === 'function') {
+      panner.setPosition(dir[0], dir[1], dir[2]);
+    }
+    chain.dir = dir;
+  }
+
+  /**
+   * Liga ou desliga o filtro de ambiente desta fonte.
+   *
+   * O `BiquadFilterNode` **não existe** enquanto o efeito é `none`: um
+   * passa-baixa em 20 kHz seria transparente ao ouvido e não seria transparente
+   * à CPU, e a instrução da etapa foi explícita sobre não manter processamento
+   * de áudio para quem não precisa dele. Numa cena de oito pessoas em que uma
+   * está amordaçada, isso é um biquad, não oito.
+   *
+   * A religação acontece só quando o efeito MUDA, que é raro — amordaçar,
+   * desmaiar, cair. O caso comum não paga nada.
+   */
+  function applyEffect(chain, effect) {
+    const desired = effect || 'none';
+    if (chain.effect === desired) return;
+
+    const ctx = state.audioCtx;
+    const settings = state.effectSettings[desired];
+
+    if (!settings) {
+      // Voltando para `none`: o filtro sai da cadeia e é descartado.
+      if (chain.filter) {
+        try { chain.gainNode.disconnect(); } catch { /* já solto */ }
+        try { chain.filter.disconnect(); } catch { /* já solto */ }
+        chain.filter = null;
+        state.audioStats.filters--;
+        chain.gainNode.connect(chain.panner);
+      }
+      chain.effect = 'none';
+      return;
+    }
+
+    if (!chain.filter) {
+      const filter = ctx.createBiquadFilter();
+      filter.type = 'lowpass';
+      // Q no padrão (0.707, Butterworth): sem ressonância na frequência de
+      // corte. Um Q alto faria a mordaça soar como um telefone com assobio,
+      // que chama mais atenção do que a voz que ela deveria esconder.
+      filter.Q.value = Math.SQRT1_2;
+      try { chain.gainNode.disconnect(); } catch { /* já solto */ }
+      chain.gainNode.connect(filter);
+      filter.connect(chain.panner);
+      chain.filter = filter;
+      state.audioStats.filters++;
+    }
+
+    chain.filter.frequency.setTargetAtTime(settings.lowpassHz, ctx.currentTime, 0.05);
+    chain.effect = desired;
   }
 
   /** base64 → Float32 mono. PCM 16-bit little-endian, como o helper envia. */
@@ -763,16 +1041,107 @@
     return pcm;
   }
 
-  function playRelayFrame(fromActorId, volume, b64) {
-    if (typeof b64 !== 'string' || !b64.length) return;
+  /**
+   * Converte base64 em bytes crus, sem interpretar como PCM — é o que um
+   * pacote Opus é: bytes opacos que só o `AudioDecoder` sabe ler. Distinto de
+   * `decodeRelayFrame`, que já devolve amostras normalizadas.
+   */
+  function base64ToBytes(b64) {
+    const bin = atob(b64);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    return bytes;
+  }
 
-    let pcm;
+  /**
+   * Cria (ou recria) o `AudioDecoder` Opus deste locutor, sob demanda.
+   *
+   * **Não verificado na CEF 108 real** — só num Chromium de mesa (148) antes
+   * de escrever isto, onde `{codec:'opus', sampleRate, numberOfChannels}`
+   * decodifica pacotes crus sem `description`/OpusHead nenhum. Se a CEF não
+   * tiver `AudioDecoder`, ou recusar o `configure()`, o efeito é quadros Opus
+   * descartados com aviso — nunca decodificados como ruído. Ver ADR_006.
+   *
+   * A ordem de saída do decoder tem que bater com a ordem de entrada — Opus
+   * por pacote não tem quadro-B nem dependência entre pacotes, então isso vale
+   * sempre, mas o volume/efeito de CADA quadro não viaja com a saída do
+   * `AudioDecoder` (a API não tem esse campo). `opusPending` é a fila que
+   * resolve isso: um `decode()` empilha o volume/efeito que valiam NAQUELE
+   * quadro, e o `output` desempilha na mesma ordem — sem isso, um
+   * `proximity_update` que chegasse entre o decode e o output aplicaria o
+   * volume ERRADO a um quadro que já estava em voo.
+   */
+  function ensureOpusDecoder(chain, fromActorId) {
+    if (chain.opusDecoder && chain.opusDecoder.state !== 'closed') return chain.opusDecoder;
+    if (typeof window.AudioDecoder === 'undefined') return null;
+
+    chain.opusPending = [];
+    let decoder;
     try {
-      pcm = decodeRelayFrame(b64);
+      decoder = new window.AudioDecoder({
+        output: (audioData) => {
+          const pending = chain.opusPending.shift();
+          const pcm = new Float32Array(audioData.numberOfFrames);
+          audioData.copyTo(pcm, { planeIndex: 0 });
+          audioData.close();
+          // Sem pendência correspondente não deveria acontecer — Opus por
+          // pacote produz uma saída por entrada —, mas descartar em silêncio
+          // aqui seria tocar áudio no volume/efeito de outro quadro.
+          if (!pending) return;
+          scheduleDecodedFrame(fromActorId, pending.volume, pending.effect, pcm);
+        },
+        error: (err) => {
+          state.audioStats.framesDropped++;
+          console.error('[voip] Opus: decoder entrou em erro; será recriado no próximo quadro.', err);
+        }
+      });
+      decoder.configure({ codec: 'opus', sampleRate: RELAY_SAMPLE_RATE, numberOfChannels: 1 });
     } catch (err) {
-      console.error('[voip] audio_frame ilegível:', err);
+      console.error('[voip] Opus: CEF sem suporte a AudioDecoder("opus")?', err);
+      return null;
+    }
+    chain.opusDecoder = decoder;
+    return decoder;
+  }
+
+  function playOpusRelayFrame(fromActorId, volume, b64, effect) {
+    const chain = getRelayChain(fromActorId);
+    const decoder = ensureOpusDecoder(chain, fromActorId);
+    if (!decoder) { state.audioStats.framesDropped++; return; }
+
+    let bytes;
+    try {
+      bytes = base64ToBytes(b64);
+    } catch (err) {
+      state.audioStats.framesDropped++;
+      console.error('[voip] audio_frame (opus) ilegível:', err);
       return;
     }
+    if (!bytes.length) return;
+
+    chain.opusPending.push({ volume, effect });
+    chain.opusSeq += 1;
+    try {
+      decoder.decode(new window.EncodedAudioChunk({
+        type: 'key',  // todo pacote Opus decodifica sozinho — não há quadro-B pra depender
+        timestamp: chain.opusSeq * 20000,  // µs; só precisa ser crescente, não é o relógio real
+        data: bytes
+      }));
+    } catch (err) {
+      chain.opusPending.pop();
+      state.audioStats.framesDropped++;
+      console.error('[voip] Opus: decode() lançou:', err);
+    }
+  }
+
+  /**
+   * Agenda um quadro já decodificado (PCM normalizado, venha de
+   * `decodeRelayFrame` ou do `output` do `AudioDecoder`) na cadeia daquele
+   * locutor. Extraído de `playRelayFrame` para servir os dois codecs sem
+   * duplicar a lógica de jitter buffer — que não sabe nem precisa saber de
+   * onde as amostras vieram.
+   */
+  function scheduleDecodedFrame(fromActorId, volume, effect, pcm) {
     if (!pcm.length) return;
 
     const ctx = ensureAudioContext();
@@ -780,12 +1149,25 @@
 
     // Só reprograma o ganho quando o volume muda de verdade. Chamar
     // setTargetAtTime 50x por segundo empilharia eventos na timeline do
-    // AudioParam sem mudar nada — o servidor só recalcula volume a cada 2s.
-    const volumeMudou = volume !== chain.volume;
-    if (volumeMudou) {
+    // AudioParam sem mudar nada.
+    if (volume !== chain.volume) {
       chain.volume = volume;
       chain.gainNode.gain.setTargetAtTime(volume, ctx.currentTime, 0.1);
     }
+
+    // O efeito vem no QUADRO e não só no `proximity_update`: uma mordaça
+    // colocada entre dois ticks precisa valer no quadro seguinte, não daqui a
+    // 150 ms. `applyEffect` sai na primeira linha quando nada mudou.
+    applyEffect(chain, effect);
+
+    // `audioLevel` do cliente: RMS do quadro que ele já decodificou. Um
+    // `AnalyserNode` daria o mesmo número e custaria um nó e uma FFT por
+    // locutor; esta é uma passada por 960 amostras que já estão em cache.
+    // O SERVIDOR não tem este número — ele não abre o PCM, e é isso que
+    // `voice-speaking-state.audioLevel()` devolve `null` para dizer.
+    let soma = 0;
+    for (let i = 0; i < pcm.length; i++) soma += pcm[i] * pcm[i];
+    chain.level = Math.sqrt(soma / pcm.length);
 
     const buffer = ctx.createBuffer(1, pcm.length, RELAY_SAMPLE_RATE);
     buffer.getChannelData(0).set(pcm);
@@ -793,17 +1175,40 @@
     source.buffer = buffer;
     source.connect(chain.gainNode);
 
+    // Um `BufferSource` é descartável por contrato — não se pode chamar
+    // `start()` duas vezes nele — e o navegador o coleta sozinho depois de
+    // tocar. O `onended` existe para o CONTADOR, não para a limpeza: sem ele
+    // `voiceStats()` não teria como mostrar que as fontes não estão se
+    // acumulando, que é justamente o vazamento que este pipeline poderia ter.
+    chain.activeSources++;
+    source.onended = () => { chain.activeSources--; };
+
     const now = ctx.currentTime;
-    if (chain.nextPlayTime < now || chain.nextPlayTime > now + RELAY_MAX_QUEUE_S) {
-      chain.nextPlayTime = now + RELAY_JITTER_S;
+    if (chain.nextPlayTime < now) {
+      // Underrun de verdade: a fonte atrasou e o colchão atual não segurou.
+      // Cresce o colchão deste locutor — não o de todo mundo, e não a
+      // constante global — e reagenda a partir de agora com o colchão novo.
+      chain.jitterS = Math.min(RELAY_JITTER_MAX_S, chain.jitterS + RELAY_JITTER_GROW_S);
+      chain.framesSinceUnderrun = 0;
+      chain.nextPlayTime = now + chain.jitterS;
+      state.audioStats.underruns++;
+    } else if (chain.nextPlayTime > now + RELAY_MAX_QUEUE_S) {
+      // Rajada de quadros adiantados, não underrun — não cresce o colchão por
+      // isso, só reencaixa no presente com o colchão que já tinha.
+      chain.nextPlayTime = now + chain.jitterS;
+    } else {
+      // Quadro chegou dentro do colchão: mais uma prova de que o colchão atual
+      // é suficiente. `RELAY_JITTER_HEALTHY_FRAMES` seguidos sem underrun
+      // encolhe um pouco — devagar, pra não oscilar a cada rajada isolada.
+      chain.framesSinceUnderrun++;
+      if (chain.framesSinceUnderrun >= RELAY_JITTER_HEALTHY_FRAMES) {
+        chain.jitterS = Math.max(RELAY_JITTER_MIN_S, chain.jitterS - RELAY_JITTER_SHRINK_S);
+        chain.framesSinceUnderrun = 0;
+      }
     }
     source.start(chain.nextPlayTime);
     chain.nextPlayTime += buffer.duration;
-
-    // Pelo mesmo motivo do ganho: o HUD só muda quando o volume muda. Sem a
-    // guarda seriam 50 escritas de DOM por segundo por locutor, num overlay
-    // desenhado por cima do jogo, pra pintar sempre a mesma largura de barra.
-    if (volumeMudou) updatePeerHUD(fromActorId, volume, false);
+    state.audioStats.framesPlayed++;
 
     // Corrige o chip na primeira vez que áudio realmente chega. Sem isto, quem
     // está no client oficial lê "VOZ INDISPONÍVEL" enquanto ouve outra pessoa
@@ -817,12 +1222,101 @@
     }
   }
 
+  /**
+   * Recebe um `audio_frame` do relay e decide o codec — `codec` ausente é
+   * PCM cru (o `voice-helper` legado, ou a sonda de bancada, já em campo
+   * sem esse campo), `codec:"opus"` é a Fase 2. O servidor nunca decide isso:
+   * só repassa o que o locutor declarou (`voip-service.js relayAudioFrame`).
+   */
+  function playRelayFrame(fromActorId, volume, b64, effect, codec) {
+    if (typeof b64 !== 'string' || !b64.length) return;
+
+    if (codec === 'opus') {
+      playOpusRelayFrame(fromActorId, volume, b64, effect);
+      return;
+    }
+
+    let pcm;
+    try {
+      pcm = decodeRelayFrame(b64);
+    } catch (err) {
+      state.audioStats.framesDropped++;
+      console.error('[voip] audio_frame ilegível:', err);
+      return;
+    }
+    scheduleDecodedFrame(fromActorId, volume, effect, pcm);
+  }
+
+  /**
+   * Desmonta a cadeia de áudio de um locutor.
+   *
+   * **Todos** os nós saem, não só o ganho. Antes desta etapa a cadeia era um
+   * `GainNode` só e desconectar ele bastava; agora são até três, e desconectar
+   * apenas o primeiro deixaria o filtro e o panner pendurados no `destination`
+   * — nós vivos, num grafo que o navegador continua percorrendo a cada bloco de
+   * 128 amostras, para processar silêncio. É o vazamento que a instrução
+   * "evite manter processamento de áudio para players que não estão sendo
+   * ouvidos" nomeia, e ele não aparece como erro: aparece como o jogo ficando
+   * lento depois de uma hora numa cidade movimentada.
+   */
   function removeRelayPeer(actorId) {
     const chain = state.relayPeers.get(actorId);
     if (!chain) return;
     try { chain.gainNode.disconnect(); } catch { /* contexto já fechado */ }
+    if (chain.filter) {
+      try { chain.filter.disconnect(); } catch { /* idem */ }
+      state.audioStats.filters--;
+    }
+    try { chain.panner.disconnect(); } catch { /* idem */ }
+    state.audioStats.panners--;
+    state.audioStats.chains--;
+    // O `AudioDecoder` não é um AudioNode — não vaza no grafo do Web Audio,
+    // mas segura recurso nativo do lado do WebCodecs (buffers, thread de
+    // decode). `state !== 'closed'` porque fechar um decoder já fechado
+    // (por exemplo depois de um `error`) lança.
+    if (chain.opusDecoder && chain.opusDecoder.state !== 'closed') {
+      try { chain.opusDecoder.close(); } catch { /* já fechado */ }
+    }
     state.relayPeers.delete(actorId);
   }
+
+  /**
+   * Custo do áudio no cliente, para a bancada.
+   *
+   * Exposto em `window` porque o console da CEF (localhost:9000) é o único
+   * lugar de onde alguém consegue ler isto durante um teste em jogo. Os números
+   * de CPU e FPS **não estão aqui** e não dá para inventá-los: eles saem do
+   * profiler do DevTools e do contador do jogo, e o §11 do documento da etapa
+   * diz onde olhar.
+   */
+  window.voiceStats = function voiceStats() {
+    let sources = 0;
+    for (const chain of state.relayPeers.values()) sources += chain.activeSources;
+    const snapshot = {
+      contexto: state.audioCtx ? state.audioCtx.state : 'inexistente',
+      sampleRate: state.audioCtx ? state.audioCtx.sampleRate : null,
+      // `baseLatency`/`outputLatency` existem na 108 e dizem quanto o próprio
+      // navegador acrescenta — é o pedaço da latência total que não é rede.
+      baseLatency: state.audioCtx ? (state.audioCtx.baseLatency ?? null) : null,
+      outputLatency: state.audioCtx ? (state.audioCtx.outputLatency ?? null) : null,
+      cadeias: state.audioStats.chains,
+      cadeiasPico: state.audioStats.peakChains,
+      panners: state.audioStats.panners,
+      filtros: state.audioStats.filters,
+      fontesTocando: sources,
+      quadrosTocados: state.audioStats.framesPlayed,
+      quadrosDescartados: state.audioStats.framesDropped,
+      underruns: state.audioStats.underruns,
+      peersWebRTC: state.peers.size,
+      // `performance.memory` é não-padrão e só existe em Chromium. Está aqui
+      // com guarda porque é a ÚNICA leitura de memória que a CEF dá de graça.
+      memoriaMB: (window.performance && performance.memory)
+        ? Math.round(performance.memory.usedJSHeapSize / 1048576)
+        : null
+    };
+    console.table ? console.table(snapshot) : console.log(snapshot);
+    return snapshot;
+  };
 
   // ── WebRTC ────────────────────────────────────────────────────────────────
   async function initMicrophone() {
@@ -838,6 +1332,11 @@
       // explicação: são 12px no topo, bons pra estado, ruins pra motivo. Por
       // isso o chip carrega o estado e o chat-log carrega o porquê.
       state.voiceFatal = true;
+      // O chip de baixo é sobre a SUA voz, e a sua voz está com erro. O chip de
+      // cima continua carregando o porquê — 12px no topo são bons para estado e
+      // ruins para motivo, e é por isso que são dois e não um.
+      state.voiceError = err.name || 'microfone';
+      renderVoiceChip();
 
       if (err.name === 'NotAllowedError' || err.name === 'SecurityError') {
         // Limitação do client SkyMP oficial: o CEF embutido recusa getUserMedia.
@@ -954,7 +1453,6 @@
       state.peers.delete(actorId);
     }
     removeRelayPeer(actorId);
-    removePeerHUD(actorId);
   }
 
   function sendSignal(msg) {
@@ -964,26 +1462,50 @@
   }
 
   // ── HUD ──────────────────────────────────────────────────────────────────
-  function updatePeerHUD(actorId, volume, muted) {
-    let el = document.getElementById(`peer-${actorId}`);
-    if (!el) {
-      el = document.createElement('div');
-      el.id = `peer-${actorId}`;
-      el.className = 'voip-peer';
-      el.innerHTML = `
-        <div class="icon"></div>
-        <span class="peer-name">Jogador</span>
-        <div class="vol-bar"><div class="vol-fill" style="width:0%"></div></div>
-      `;
-      document.getElementById('voip-hud').appendChild(el);
+  //
+  // Seis estados, e só seis. A ordem abaixo é a de PRECEDÊNCIA, e ela importa:
+  // quem está mutado E em modo sussurro precisa ler MUDO, porque é o mudo que
+  // explica por que ninguém responde. Um chip que mostrasse WHISPER nessa
+  // situação estaria dizendo a verdade e escondendo o problema.
+  //
+  //   VOICE ERROR  >  MUDO  >  MIC  >  SUSSURRO / NORMAL / GRITO
+  //
+  // `MIC` não é um sétimo estado: é o modo em curso com a voz saindo de fato,
+  // e por isso ele APARECE JUNTO do modo em vez de substituí-lo — saber que o
+  // microfone está aberto sem saber o alcance seria meia informação.
+  const ROTULO_MODO = { whisper: 'SUSSURRO', normal: 'NORMAL', shout: 'GRITO' };
+
+  function renderVoiceChip() {
+    const el = document.getElementById('voip-chip');
+    if (!el) return;
+    const texto = document.getElementById('voip-chip-text');
+
+    el.classList.add('visivel');
+    el.classList.remove('transmitindo', 'mudo', 'erro');
+
+    if (state.voiceError) {
+      el.classList.add('erro');
+      texto.textContent = 'VOZ COM ERRO';
+      return;
     }
-    el.classList.toggle('muted', muted);
-    el.querySelector('.vol-fill').style.width = `${Math.round(volume * 100)}%`;
+    if (state.muted) {
+      el.classList.add('mudo');
+      texto.textContent = 'MUDO';
+      return;
+    }
+
+    const modo = ROTULO_MODO[state.voiceMode] || ROTULO_MODO.normal;
+    if (state.transmitting) {
+      el.classList.add('transmitindo');
+      texto.textContent = `MIC · ${modo}`;
+      return;
+    }
+    texto.textContent = modo;
   }
 
-  function removePeerHUD(actorId) {
-    const el = document.getElementById(`peer-${actorId}`);
-    if (el) el.remove();
+  function esconderVoiceChip() {
+    const el = document.getElementById('voip-chip');
+    if (el) el.classList.remove('visivel');
   }
 
   function setStatus(type, text) {
@@ -998,13 +1520,39 @@
     if (state.localStream) {
       state.localStream.getAudioTracks().forEach(t => t.enabled = !state.muted);
     }
+    // Mutar derruba a transmissão AQUI também, e não só no servidor. O servidor
+    // já limpa `transmitting` em `setMuted` — o que esta linha impede é o chip
+    // continuar pulsando `MIC` no meio segundo até a confirmação voltar, que é
+    // meio segundo de a tela dizer que a pessoa está sendo ouvida quando não
+    // está. A autoridade continua sendo a de lá; esta é a cópia desenhada.
+    if (state.muted) state.transmitting = false;
     sendSignal({ type: 'mute', muted: state.muted });
     mp.trigger('cef::voip:mute_changed', { muted: state.muted });
+    renderVoiceChip();
   }
 
   function setVoiceMode(mode) {
-    state.voiceMode = mode;
+    // O chip NÃO é atualizado aqui: o servidor pode recusar o modo, e desenhar
+    // o pedido antes da resposta é como um cliente fica mostrando `shout` para
+    // alguém que continua falando normal. Quem atualiza é o `case 'voice_mode'`.
     sendSignal({ type: 'voice_mode', mode });
+  }
+
+  /**
+   * Desliga o áudio de voz por completo: toda cadeia desmontada, todo peer
+   * fechado, chip escondido.
+   *
+   * Chamado quando a sinalização cai. Sem ele, a última cadeia de cada locutor
+   * ficaria pendurada no `destination` até a página ser recarregada — e a
+   * página de um overlay de jogo não é recarregada. É a limpeza que o teste de
+   * `disconnect` exige e a que um jogador percebe como o jogo ficando pesado
+   * depois de umas horas.
+   */
+  function tearDownVoiceAudio() {
+    for (const [id] of state.relayPeers) removeRelayPeer(id);
+    for (const [id] of state.peers) removePeer(id);
+    state.transmitting = false;
+    state.relayHeard = false;
   }
 
   // ── Trade Overlay ─────────────────────────────────────────────────────────

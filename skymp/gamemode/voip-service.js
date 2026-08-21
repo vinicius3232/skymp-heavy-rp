@@ -35,6 +35,29 @@
  * relay resolve NAT/CGNAT: dois jogadores em redes residenciais distintas não
  * fecham conexão direta, mas os dois alcançam o servidor.
  *
+ * ─── Refatoração de 14/08/2026: a proximidade saiu daqui ───────────────────
+ *
+ * Este arquivo era o dono de tudo: sockets, tickets, formato PCM, cálculo de
+ * proximidade O(n²), tabela de audiência, `voiceMode` e `muted` por ator. Sete
+ * responsabilidades, 755 linhas, e a única forma de mexer numa era abrir o
+ * arquivo inteiro.
+ *
+ * O que **saiu** para `core/voice/` e não volta:
+ *
+ *   - quem ouve quem, e a que volume  → `voice-route-engine` + `voice-policy`
+ *   - a vizinhança                    → `voice-spatial-index` (era o laço O(n²))
+ *   - `voiceMode`, `muted`, PTT       → `voice-state` + `voice-policy`
+ *   - sessão, identidade, token       → `voice-session`
+ *   - o laço e a leitura do mundo     → `voice-core`
+ *
+ * O que **fica**, porque é o que este arquivo de fato é: o **transporte
+ * legado** — o WebSocket, o handshake por ticket, os papéis `listener`/`sender`,
+ * o teto de tamanho de quadro, a quota de cadência e o relay de bytes.
+ *
+ * Nenhuma regra de voz mora mais aqui. `tickProximity` e `calcVolume`
+ * continuam exportados porque são a superfície que os testes e o resto do
+ * projeto já usam, mas hoje são uma linha cada, delegando ao Voice Core.
+ *
  * Nota de 14/08/2026: a CEF do SkyMP é a **108** (Chromium 108.0.5359.125), não
  * a "~70" que este cabeçalho e os docs de voz afirmavam. A 108 tem
  * `CefPermissionHandler`, então existe um caminho de microfone **por origem e
@@ -55,6 +78,7 @@ const path = require('path');
 const ws = require('ws');
 const { WebSocketServer, WebSocket } = ws;
 const commands = require('./commands');
+const voiceSecurity = require('./core/voice/voice-security');
 
 const VOIP_PORT = Number.parseInt(process.env.VOIP_PORT, 10) || 7778;
 const VOIP_BIND_HOST = process.env.VOIP_BIND_HOST || '127.0.0.1';
@@ -96,7 +120,7 @@ const DEFAULT_VOIP_ROLE = 'listener';
 /**
  * Clientes conectados: actorId -> entrada do ator.
  *
- *   { listener: conexão|null, sender: conexão|null, voiceMode, muted }
+ *   { listener: conexão|null, sender: conexão|null }
  *
  * Cada conexão é `{ ws, actorId, role, oversizedFrameLogged }`.
  *
@@ -109,10 +133,14 @@ const DEFAULT_VOIP_ROLE = 'listener';
  * O que é por CONEXÃO e o que é por ATOR:
  *
  * - Por conexão: o socket e o log de frame grande (é o socket que se comporta mal).
- * - Por ator: `voiceMode` e `muted`. Mutar é uma decisão da pessoa sobre a própria
- *   voz na cena, não sobre um cabo. Se `muted` vivesse na conexão, mutar pela UI
- *   deixaria o helper transmitindo — a pessoa se veria mutada e continuaria sendo
- *   ouvida, que é o pior defeito possível num controle de microfone.
+ * - Por ator: `voiceMode`, `muted` e PTT — que desde 14/08/2026 **não moram
+ *   mais aqui**. Foram para `core/voice/voice-state.js`, indexados por
+ *   `actorId` e sem campo de socket nenhum, para que "mute por conexão" deixe
+ *   de ser representável. Este mapa ficou sendo só a lista de sockets abertos.
+ *
+ * A lição que motivou a separação continua valendo e está registrada lá: mutar
+ * pela UI com o estado na conexão deixava o helper transmitindo — a pessoa se
+ * via mutada e continuava sendo ouvida.
  *
  * Ver `docs/technical/VOICE_NATIVE_HELPER.md` §10.
  */
@@ -134,14 +162,17 @@ function _ticketKey(actorId, role) {
   return `${actorId}:${role}`;
 }
 
-// Distancias de voz — derivadas dos raios do chat em core/proximity-ranges.js,
-// pra que falar e escrever cheguem exatamente nas mesmas pessoas.
-const { VOICE_RANGES } = require('./core/proximity-ranges');
+// O Voice Core. Este arquivo não calcula proximidade, não guarda `voiceMode`
+// nem `muted` e não conhece raio nenhum — ele pergunta.
+//
+// A instância é única e criada no load porque o serviço de voz também é único;
+// `startVoipServer` liga o laço e `stopVoipServer` o desliga.
+const { createVoiceCore } = require('./core/voice/voice-core');
+const { createVoiceTelemetry } = require('./core/voice/voice-telemetry');
+const { createVoiceDiagnostics } = require('./core/voice/voice-diagnostics');
+const { volumeAt } = require('./core/voice/voice-policy');
 
-// A regra de "o que conta como célula" mora num lugar só. Reaproveitar o
-// `getCell` daqui em vez de escrever mais uma cadeia de nomes de campo é o que
-// mantém voz, nametag e alcance de ação concordando sobre onde cada um está.
-const rangeUtils = require('./core/range-utils');
+const voiceCore = createVoiceCore();
 
 /**
  * Formato do áudio no fio (Fase 1): PCM cru, 16-bit little-endian, mono, 48kHz,
@@ -180,23 +211,32 @@ const MAX_AUDIO_FRAME_B64 = 8192;
 const MAX_VOIP_MESSAGE_BYTES = 32 * 1024;
 
 let wss = null;
-let _proximityTimer = null;
+let _unsubscribeRoutes = null;
+let _unsubscribeSpeaking = null;
 
 /**
- * Audiência por locutor, recalculada a cada `tickProximity()`:
- *   actorId do locutor -> [{ actorId: ouvinte, volume }]
+ * Atores em **microfone aberto** — os que autenticaram sem declarar
+ * `ptt: true`, e por isso recebem uma concessão permanente de transmissão.
  *
- * É a transposta do que o tick já calculava e jogava fora. A proximidade custa
- * O(n²) de distância 3D; um frame chega a 50/s por locutor, então recalcular por
- * frame seria pagar esse O(n²) cinquenta vezes por segundo por pessoa falando.
- * O relay só consulta esta tabela.
+ * Não é só um registro de aviso: é o estado que diz que a concessão precisa ser
+ * **restabelecida**. Mutar limpa `transmitting` de propósito (para que um mute
+ * durante a fala não deixe o PTT engatilhado), e num cliente com PTT quem o
+ * traz de volta é a tecla. Um cliente legado não tem tecla — sem este conjunto,
+ * o primeiro mute o silenciaria para sempre, e desmutar não devolveria a voz.
  *
- * O preço é que a audiência tem até 2s de idade: quem sai do alcance continua
- * ouvindo até o próximo tick. Não é uma imprecisão nova — o `proximity_update`
- * que ajusta o ganho do WebRTC sempre teve exatamente a mesma defasagem; o relay
- * herda a propriedade em vez de introduzi-la.
+ * @type {Set<number>}
  */
-const _audienceByActor = new Map();
+const _openMicActors = new Set();
+
+/**
+ * Devolve a concessão permanente a um ator em microfone aberto.
+ * Sem efeito para quem fala o protocolo de PTT — lá quem concede é a tecla.
+ * @param {number} actorId
+ */
+function _restoreOpenMic(actorId) {
+  if (!_openMicActors.has(actorId)) return;
+  voiceCore.policy.pttDown(actorId);
+}
 
 /**
  * Emite um ticket de uso único para um actorId se autenticar num papel.
@@ -225,7 +265,7 @@ function _consumeTicket(actorId, token, role = DEFAULT_VOIP_ROLE) {
 function _entryFor(actorId) {
   let entry = voipClients.get(actorId);
   if (!entry) {
-    entry = { listener: null, sender: null, voiceMode: 'normal', muted: false };
+    entry = { listener: null, sender: null };
     voipClients.set(actorId, entry);
   }
   return entry;
@@ -267,7 +307,22 @@ function _consumeAudioFrameQuota(conn, now = Date.now()) {
 function startVoipServer(port = VOIP_PORT, host = VOIP_BIND_HOST) {
   if (wss) return;
 
-  wss = new WebSocketServer({ port, host, maxPayload: MAX_VOIP_MESSAGE_BYTES });
+  wss = new WebSocketServer({
+    port, host, maxPayload: MAX_VOIP_MESSAGE_BYTES,
+    // Allowlist de origem, quando configurada. É defesa em profundidade e não
+    // substitui o ticket: quem escolhe o header escolhe omiti-lo, e por isso
+    // ausência de `Origin` é ACEITA — o `voice-helper.exe` não é um navegador e
+    // não manda um. O que isto barra de verdade é o caso do navegador, onde o
+    // header é obrigatório e a página não consegue removê-lo.
+    verifyClient: (info) => {
+      const origin = info.origin || (info.req && info.req.headers && info.req.headers.origin);
+      const verdict = voiceSecurity.checkOrigin(origin);
+      if (!verdict.allowed) {
+        console.warn(`[voip] Handshake recusado — ${verdict.reason}`);
+      }
+      return verdict.allowed;
+    }
+  });
 
   wss.on('listening', () => {
     console.log(`[voip] WebSocket signaling server listening on ws://${host}:${port}`);
@@ -295,12 +350,22 @@ function startVoipServer(port = VOIP_PORT, host = VOIP_BIND_HOST) {
           const claimedRole = msg.role === undefined ? DEFAULT_VOIP_ROLE : msg.role;
           if (!VOIP_ROLES.includes(claimedRole)) {
             console.log(`[voip] Auth rejeitada (role desconhecido: ${msg.role}) para actorId ${msg.actorId}.`);
+            // Contado para `voice_auth_failures`. Autenticação falha em quatro
+            // lugares diferentes (aqui, identidade desconhecida, identidade que
+            // não sobrevive à leitura, emissão de token) e a operação precisa de
+            // UM número — ver `voice-telemetry.js`.
+            voiceCore.metrics.count('legacy.authRejected');
             ws.send(JSON.stringify({ type: 'auth_failed' }));
             ws.close();
             return;
           }
           if (!Number.isFinite(claimedActorId) || !_consumeTicket(claimedActorId, msg.ticket, claimedRole)) {
             console.log(`[voip] Auth rejeitada (ticket inválido/expirado) para actorId ${msg.actorId} como ${claimedRole}.`);
+            // Contado para `voice_auth_failures`. Autenticação falha em quatro
+            // lugares diferentes (aqui, identidade desconhecida, identidade que
+            // não sobrevive à leitura, emissão de token) e a operação precisa de
+            // UM número — ver `voice-telemetry.js`.
+            voiceCore.metrics.count('legacy.authRejected');
             ws.send(JSON.stringify({ type: 'auth_failed' }));
             ws.close();
             return;
@@ -328,18 +393,93 @@ function startVoipServer(port = VOIP_PORT, host = VOIP_BIND_HOST) {
             audioLastRefillAt: Date.now()
           };
 
-          console.log(`[voip] Actor 0x${clientActorId.toString(16)} connected to VOIP as ${clientRole}.`);
-          ws.send(JSON.stringify({ type: 'auth_ok', actorId: clientActorId, role: clientRole }));
+          // O ator entra na cena de voz do Voice Core. `transport: 'legacy'`
+          // porque quem transporta aqui é este WebSocket, não o LiveKit — ver
+          // `voice-core.attach`.
+          // `getActiveCharacterData` devolve `{characterId, firstName, ...}` —
+          // não `{id}`. Um `character.id` aqui vira `undefined`, o ator entra
+          // sem personagem, `canSpeak` recusa por "personagem não carregado", e
+          // o sintoma é voz que simplesmente não sai.
+          const character = commands.getActiveCharacterData(clientActorId);
+          voiceCore.attach(clientActorId, {
+            characterId: character ? character.characterId : null,
+            transport: 'legacy'
+          });
+
+          // ── Negociação de PTT ──────────────────────────────────────────
+          //
+          // PTT é o padrão do servidor, e o Voice Core recusa transmitir de
+          // quem não apertou. O `voice-helper.exe` que já existe e já capturou
+          // áudio real **não fala esse protocolo**: ele autentica e começa a
+          // mandar quadros.
+          //
+          // Exigir PTT dele agora silenciaria o único caminho de captura
+          // provado que este projeto tem, para fechar um furo que este caminho
+          // sempre teve. Então o handshake NEGOCIA: um cliente que declara
+          // `ptt: true` é governado pelo PTT; um que não declara recebe uma
+          // concessão permanente e um aviso nomeando o que está aberto.
+          //
+          // Isto é dívida registrada, não desenho: some quando o helper
+          // aprender `ptt_down`/`ptt_up`. O caminho LiveKit não tem esta
+          // concessão — lá o PTT vale sem exceção.
+          const clientSpeaksPtt = msg.ptt === true;
+          if (!clientSpeaksPtt) {
+            if (!_openMicActors.has(clientActorId)) {
+              _openMicActors.add(clientActorId);
+              console.warn(
+                `[voip] Actor 0x${clientActorId.toString(16)} autenticou sem declarar 'ptt: true'. ` +
+                `Microfone aberto por compatibilidade com o voice-helper legado.`
+              );
+            }
+            _restoreOpenMic(clientActorId);
+          }
+
+          console.log(
+            `[voip] Actor 0x${clientActorId.toString(16)} connected to VOIP as ${clientRole}` +
+            `${clientSpeaksPtt ? ' (PTT)' : ' (microfone aberto — legado)'}.`
+          );
+          ws.send(JSON.stringify({
+            type: 'auth_ok', actorId: clientActorId, role: clientRole, ptt: clientSpeaksPtt,
+            // Parâmetros dos efeitos, UMA vez por conexão. Eles vêm do
+            // `server-options` e não mudam enquanto o servidor roda; repetir a
+            // frequência de corte em cada `proximity_update` seria mandar 50
+            // vezes por segundo um número que muda quando alguém edita um JSON.
+            effects: voiceCore.effects()
+          }));
           break;
         }
 
-        case 'voice_mode':
-          // Modo de voz é do ator, não do socket: define o alcance com que a
-          // pessoa é ouvida, e quem fala (helper) não é quem tem o seletor (UI).
-          if (clientActorId !== null && _isCurrentClientSocket(clientActorId, clientRole, ws)) {
-            voipClients.get(clientActorId).voiceMode = msg.mode || 'normal';
+        case 'voice_mode': {
+          // O cliente PEDE; o servidor decide. Antes esta linha era
+          // `entry.voiceMode = msg.mode || 'normal'`, e `msg.mode` é uma string
+          // arbitrária vinda do socket — `'radio'` passava, virava alcance
+          // `undefined`, e a pessoa ficava inaudível sem que nada avisasse.
+          if (clientActorId === null || !_isCurrentClientSocket(clientActorId, clientRole, ws)) break;
+          const result = voiceCore.requestVoiceMode(clientActorId, msg.mode);
+          if (!result.ok) {
+            console.warn(`[voip] Actor 0x${clientActorId.toString(16)}: ${result.reason}`);
           }
+          ws.send(JSON.stringify({ type: 'voice_mode', mode: result.mode, ok: result.ok }));
           break;
+        }
+
+        case 'ptt_down': {
+          // PTT DOWN → o servidor valida `canSpeak` → permite a transmissão.
+          // A recusa volta com motivo para que a UI possa dizer "você está
+          // mutado" em vez de mostrar um microfone que parece aberto.
+          if (clientActorId === null || !_isCurrentClientSocket(clientActorId, clientRole, ws)) break;
+          const result = voiceCore.pttDown(clientActorId);
+          ws.send(JSON.stringify({ type: 'ptt', transmitting: result.ok, reason: result.reason }));
+          break;
+        }
+
+        case 'ptt_up': {
+          // PTT UP → interrompe. Nunca falha: soltar a tecla é o lado seguro.
+          if (clientActorId === null || !_isCurrentClientSocket(clientActorId, clientRole, ws)) break;
+          voiceCore.pttUp(clientActorId);
+          ws.send(JSON.stringify({ type: 'ptt', transmitting: false }));
+          break;
+        }
 
         case 'offer':
         case 'answer':
@@ -396,8 +536,13 @@ function startVoipServer(port = VOIP_PORT, host = VOIP_BIND_HOST) {
           // Mute é do ator, não da conexão: silencia a pessoa na cena, venha a
           // voz pelo helper ou pelo caminho antigo. Por conexão, mutar pela UI
           // deixaria o helper transmitindo — mutado na tela e audível na cena.
+          // O estado mora no `voice-state`, que indexa por ator e não tem onde
+          // guardar um socket.
           if (clientActorId !== null && _isCurrentClientSocket(clientActorId, clientRole, ws)) {
-            voipClients.get(clientActorId).muted = msg.muted === true;
+            voiceCore.requestMute(clientActorId, msg.muted === true);
+            // Desmutar devolve a concessão de microfone aberto ao cliente
+            // legado. Ver `_restoreOpenMic`.
+            if (msg.muted !== true) _restoreOpenMic(clientActorId);
             console.log(`[voip] Actor 0x${clientActorId.toString(16)} mute=${msg.muted}`);
           }
           break;
@@ -423,9 +568,15 @@ function startVoipServer(port = VOIP_PORT, host = VOIP_BIND_HOST) {
         broadcast({ type: 'peer_left', actorId: clientActorId }, clientActorId);
       }
 
-      // A entrada só some quando os dois papéis se foram — enquanto sobrar um, o
-      // ator segue na cena, com seu `muted`/`voiceMode` preservados.
-      if (!entry.listener && !entry.sender) voipClients.delete(clientActorId);
+      // A entrada só some quando os dois papéis se foram — enquanto sobrar um,
+      // o ator segue na cena, com seu `muted`/`voiceMode` preservados no
+      // `voice-state`. Quando o último papel cai, ele sai da cena de voz por
+      // completo: `detach` limpa estado, rotas, amostra e sessão de uma vez.
+      if (!entry.listener && !entry.sender) {
+        voipClients.delete(clientActorId);
+        _openMicActors.delete(clientActorId);
+        voiceCore.detach(clientActorId, 'disconnect');
+      }
 
       console.log(`[voip] Actor 0x${clientActorId.toString(16)} disconnected from VOIP (${clientRole}).`);
     });
@@ -435,90 +586,73 @@ function startVoipServer(port = VOIP_PORT, host = VOIP_BIND_HOST) {
     });
   });
 
-  // Ticker de proximidade: a cada 2s calcula volumes para todos os pares.
-  // unref: um ticker pendente não deve impedir o processo (ou os testes) de encerrar.
-  _proximityTimer = setInterval(() => tickProximity(), 2000);
-  if (typeof _proximityTimer.unref === 'function') _proximityTimer.unref();
+  // O laço de proximidade agora é do Voice Core (tick espacial de ~150 ms, com
+  // recompute imediato para mudanças críticas). O `setInterval` de 2 s que
+  // morava aqui existia porque o cálculo era O(n²); ele não é mais.
+  //
+  // Entregar o `proximity_update` continua sendo deste arquivo: é ele que tem
+  // os sockets. O Voice Core avisa; o transporte entrega.
+  _unsubscribeRoutes = voiceCore.onRoutes((routesByListener) => {
+    for (const actorId of voipClients.keys()) {
+      const listener = _openListener(actorId);
+      if (!listener) continue;
+      // `peersFor` é a fonte única do formato: ele já compõe volume, efeito,
+      // direção e estado de fala. Remontar a lista aqui a partir do mapa cru
+      // faria este arquivo ter uma segunda opinião sobre o payload, e ela
+      // envelheceria calada — foi assim que `character.id` virou `undefined`.
+      listener.ws.send(JSON.stringify({ type: 'proximity_update', peers: voiceCore.peersFor(actorId) }));
+    }
+  });
+
+  // Estado de fala → quem está em alcance. É o que permite ao cliente animar a
+  // boca de outra pessoa e acender o HUD dela sem esperar o próximo
+  // `proximity_update` — a transição de fala é o evento mais rápido do sistema,
+  // e amarrá-la ao tick de 150 ms produziria bocas atrasadas em relação ao som.
+  //
+  // Vai só para quem JÁ ouve o locutor: quem não recebe a voz dele não tem o
+  // que animar, e mandar assim mesmo seria contar a todo mundo, o tempo todo,
+  // quem está falando onde.
+  _unsubscribeSpeaking = voiceCore.speaking.onChange((actorId, isSpeaking) => {
+    const audience = voiceCore.audienceFor(actorId);
+    const raw = JSON.stringify({ type: 'voice_speaking', actorId, speaking: isSpeaking });
+    // Ao PARAR, a audiência já pode estar vazia (foi o que causou a parada).
+    // Nesse caso o aviso vai para quem estava ouvindo no último recompute, que
+    // é a informação mais recente que existe — sem isso, soltar o PTT deixaria
+    // a boca aberta em quem acabou de sair de alcance.
+    const targets = audience.length > 0 ? audience : voiceCore.lastAudienceFor(actorId);
+    for (const listener of targets) {
+      const client = _openListener(listener.actorId);
+      if (client) client.ws.send(raw);
+    }
+  });
+
+  voiceCore.start();
 
   console.log('[voip] VOIP service initialized.');
 }
 
 /**
- * Calcula a distancia 3D entre dois atores, envia os volumes ajustados e
- * reconstrói a audiência de cada locutor (usada pelo relay de `audio_frame`).
+ * Recalcula quem ouve quem. **Uma linha, e é essa a notícia.**
+ *
+ * Era um laço aninhado sobre todos os atores — 9.900 pares com 100 jogadores,
+ * 39.800 com 200 — rodando a cada 2 s justamente porque ninguém queria pagar
+ * aquilo com mais frequência. Hoje quem calcula é o `VoiceRouteEngine` sobre o
+ * `VoiceSpatialIndex`, o tick é de 150 ms, e o número está medido em
+ * `scripts/bench-voice-proximity.js` em vez de afirmado aqui.
+ *
+ * Continua exportado com este nome porque é a superfície que os testes e o
+ * resto do projeto já chamam para forçar um tick determinístico.
  */
 function tickProximity() {
-  // Zera antes de qualquer saída: sem posição não há proximidade, e sem
-  // proximidade nada deve ser retransmitido. Uma audiência velha sobrevivendo a
-  // um tick que falhou faria o relay continuar entregando com base em onde as
-  // pessoas estavam, não onde estão.
-  _audienceByActor.clear();
-
-  if (typeof mp === 'undefined') return;
-
-  // A posição é lida uma vez por ATOR, não por conexão. Um jogador com helper e
-  // UI abertos é uma pessoa num lugar só; iterar conexões faria a mesma posição
-  // ser lida duas vezes e o par aparecer duplicado na audiência — cada quadro
-  // entregue em dobro pro mesmo ouvinte.
-  const actors = [];
-  for (const [actorId, entry] of voipClients.entries()) {
-    if (!_hasOpenConnection(entry)) continue;
-    if (entry.muted) continue;
-    try {
-      const loc = mp.get(actorId, 'locationalData');
-      if (!loc) continue;
-      // A célula vem junto com a posição na mesma leitura, e é preciso guardar
-      // as duas: cada interior do Skyrim tem origem de coordenadas própria, então
-      // `pos` sozinho não diz onde a pessoa está — duas tavernas distintas têm
-      // coordenadas na mesma vizinhança numérica.
-      actors.push({ actorId, entry, pos: loc.pos, cell: rangeUtils.getCell(loc) });
-    } catch { continue; }
-  }
-
-  for (const client of actors) {
-    const proximityData = [];
-
-    for (const peer of actors) {
-      if (peer.actorId === client.actorId) continue;
-
-      // Células diferentes são lugares diferentes, por mais perto que os números
-      // fiquem — sem isso a voz atravessa de um interior para outro sem existir
-      // caminho entre eles, e o `_audienceByActor` montado aqui é o mesmo que o
-      // relay usa pra decidir quem recebe `audio_frame`. Mesma regra que
-      // `range-utils.distanceBetween` aplica (`ca !== cb` → Infinity) e que o
-      // `nametag-service` já usa. Célula desconhecida de um dos lados não
-      // descarta: falta de informação não é prova de estarem separados.
-      if (client.cell && peer.cell && client.cell !== peer.cell) continue;
-
-      const dist = distance3D(client.pos, peer.pos);
-      const range = VOICE_RANGES[peer.entry.voiceMode || 'normal'];
-      const volume = calcVolume(dist, range);
-
-      if (volume > 0) {
-        proximityData.push({ actorId: peer.actorId, volume, dist: Math.round(dist) });
-
-        // Mesmo par, visto do outro lado: `peer` fala, `client` ouve naquele
-        // volume. É exatamente o número que o `proximity_update` manda pro
-        // ganho do WebRTC — os dois caminhos ficam obrigados a concordar
-        // porque leem a mesma conta, não uma cópia dela.
-        let audience = _audienceByActor.get(peer.actorId);
-        if (!audience) {
-          audience = [];
-          _audienceByActor.set(peer.actorId, audience);
-        }
-        audience.push({ actorId: client.actorId, volume });
-      }
-    }
-
-    // O mapa de volume vai só pro `listener`: é ele que tem ganho pra ajustar.
-    // Um ator que só tem `sender` aberto (helper sem UI) continua entrando na
-    // audiência dos outros — ele fala —, apenas não tem pra onde receber.
-    const listener = _openListener(client.actorId);
-    if (listener) {
-      listener.ws.send(JSON.stringify({ type: 'proximity_update', peers: proximityData }));
-    }
-  }
+  voiceCore.recompute('tick');
 }
+
+/**
+ * Volume por distância. Reexportado de `core/voice/voice-policy.js`, que é
+ * quem tem a conta agora — e a tem em UM lugar, compartilhada com o motor de
+ * rotas. Manter o nome evita quebrar quem já importava daqui.
+ */
+const calcVolume = volumeAt;
 
 /**
  * Retransmite um `audio_frame` para quem está em alcance do locutor, anexando o
@@ -535,8 +669,19 @@ function tickProximity() {
  * @returns {number} quantos ouvintes receberam — usado por teste e log
  */
 function relayAudioFrame(fromActorId, msg) {
-  const audience = _audienceByActor.get(fromActorId);
+  // `audienceFor` consulta a política antes de devolver a tabela: entre um
+  // recompute e este quadro o PTT pode ter sido solto ou o mute ligado, e a
+  // audiência tem até um tick de idade. É aqui que "não usar só mute local
+  // como segurança" deixa de ser uma frase e vira um `return 0`.
+  const audience = voiceCore.audienceFor(fromActorId);
   if (!audience || audience.length === 0) return 0;
+
+  // O quadro chegou e a política deixou passar: este ator ESTÁ falando. É o
+  // único sinal honesto disso que o servidor tem — o PTT diz que ele pode, não
+  // que ele está. `noteAudioFrame` reconsulta `canSpeak` e devolve `false` se
+  // a resposta mudou desde o recompute, e nesse caso o quadro não é
+  // retransmitido: mesma pergunta, mesma resposta, um lugar só.
+  if (!voiceCore.noteAudioFrame(fromActorId)) return 0;
 
   let delivered = 0;
   for (const listener of audience) {
@@ -556,29 +701,23 @@ function relayAudioFrame(fromActorId, msg) {
       type: 'audio_frame',
       fromActorId,
       volume: listener.volume,
+      // O efeito viaja com o quadro, e não só no `proximity_update`, porque
+      // uma mordaça aplicada entre dois ticks precisa valer no quadro
+      // seguinte — não no próximo tick. É um campo curto; o payload é PCM
+      // ou Opus, dependendo de `codec`.
+      effect: listener.effect,
       seq: msg.seq,
+      // Repassado sem olhar dentro: o servidor não decodifica (§ acima), só
+      // encaminha o que o locutor declarou. Ausente = PCM cru, o formato de
+      // quem ainda não fala Opus (`voice-helper` antigo já em campo, ou a
+      // sonda de teste) — `decodeRelayFrame` do lado do ouvinte decide por
+      // isso, não pela versão de ninguém.
+      codec: msg.codec,
       data: msg.data
     }));
     delivered++;
   }
   return delivered;
-}
-
-/**
- * Calcula o volume (0.0 ~ 1.0) com base na distancia e no alcance.
- */
-function calcVolume(dist, maxRange) {
-  if (dist >= maxRange) return 0;
-  // Queda linear com minimo de 0.05 para quem esta muito perto
-  return Math.max(0, Math.min(1, 1 - (dist / maxRange)));
-}
-
-function distance3D(a, b) {
-  return Math.sqrt(
-    Math.pow(a[0] - b[0], 2) +
-    Math.pow(a[1] - b[1], 2) +
-    Math.pow(a[2] - b[2], 2)
-  );
 }
 
 /**
@@ -619,9 +758,12 @@ function getListeningPort() {
  * shutdown em produção hoje, o módulo não declara shutdown no module-registry).
  */
 function stopVoipServer() {
-  if (_proximityTimer) clearInterval(_proximityTimer);
-  _proximityTimer = null;
-  _audienceByActor.clear();
+  if (_unsubscribeRoutes) _unsubscribeRoutes();
+  _unsubscribeRoutes = null;
+  if (_unsubscribeSpeaking) _unsubscribeSpeaking();
+  _unsubscribeSpeaking = null;
+  voiceCore.shutdown('stopVoipServer');
+  _openMicActors.clear();
   if (!wss) return;
   wss.close();
   wss = null;
@@ -652,13 +794,31 @@ function requestVoiceConnection(actorId) {
 
   if (typeof mp === 'undefined') return;
   try {
-    mp.set(actorId, 'voipTicket', {
+    const payload = {
       actorId,
       ticket,
       host: VOIP_PUBLIC_HOST,
       port: VOIP_PORT,
       sentAt: Date.now()
-    });
+    };
+
+    // Última conferência antes de o objeto sair do processo. Não protege contra
+    // este payload — ele é conhecido, curto e obviamente limpo. Protege contra a
+    // versão dele daqui a seis meses, quando alguém precisar mandar "a
+    // configuração do LiveKit" ao cliente e espalhar um objeto de config aqui
+    // dentro. É o ponto exato onde um `...config` transforma "manda o token" em
+    // "manda o secret", e o custo de conferir é uma varredura de string por
+    // `/voz`, que é um comando humano.
+    const leak = voiceSecurity.assertNoSecretsIn(payload);
+    if (!leak.clean) {
+      console.error(
+        `[voip] BLOQUEADO: o payload de voz carregava ${leak.leaked.join(', ')}. ` +
+        'Nada foi enviado ao cliente.'
+      );
+      return;
+    }
+
+    mp.set(actorId, 'voipTicket', payload);
   } catch (err) {
     console.error('[voip] Falha ao enviar ticket de voz:', err.message);
   }
@@ -714,6 +874,39 @@ function _exposeDebugTicket(actorId, senderTicket) {
   }
 }
 
+/**
+ * Telemetria e diagnóstico deste Voice Core.
+ *
+ * Ficam aqui porque este arquivo é o dono da instância do Voice Core. Criá-los
+ * em outro lugar exigiria exportar o core, e um core exportado é um core que
+ * alguém instancia duas vezes — dois laços de proximidade decidindo rotas para
+ * as mesmas pessoas.
+ */
+const voiceTelemetry = createVoiceTelemetry({ core: voiceCore });
+const voiceDiagnostics = createVoiceDiagnostics({ core: voiceCore, telemetry: voiceTelemetry });
+
+/**
+ * Liga o diagnóstico ao `admin-service`.
+ *
+ * A direção da injeção é o ponto: o `admin-service` NÃO importa o Voice Core.
+ * Ele recebe uma interface de leitura e três ações, e continua sem saber que o
+ * sistema de voz existe. É a mesma disciplina que `voice-staff-mute` mantém com
+ * a instância compartilhada — staff não depende de voz.
+ *
+ * Chamado no `initialize` do módulo de voz. Num servidor com
+ * `ENABLE_VOIP_SERVICE=false` isto nunca roda, e os comandos de voz da staff
+ * respondem "o sistema de voz nao esta ativo" — que é a verdade.
+ */
+function bindAdminDiagnostics() {
+  try {
+    require('./admin-service').bindVoiceDiagnostics(voiceDiagnostics);
+    console.log('[voip] Diagnóstico de voz disponível para a staff (/vozdiag, /vozdesconectar, /vozreconectar).');
+  } catch (err) {
+    // Um admin-service ausente não pode impedir a voz de subir.
+    console.warn(`[voip] Não consegui ligar o diagnóstico ao admin-service: ${err.message}`);
+  }
+}
+
 function commandDefs() {
   return [
     {
@@ -727,6 +920,9 @@ function commandDefs() {
 
 module.exports = {
   commandDefs,
+  bindAdminDiagnostics,
+  voiceTelemetry,
+  voiceDiagnostics,
   startVoipServer,
   stopVoipServer,
   getConnectedVoipActors,
@@ -741,10 +937,14 @@ module.exports = {
   AUDIO_FRAME_RATE_PER_SECOND,
   AUDIO_FRAME_BURST,
   MAX_VOIP_MESSAGE_BYTES,
-  // `tickProximity` é chamado pelo ticker de 2s em produção; exposto porque o
-  // teste do relay precisa de um tick determinístico em vez de esperar o timer.
+  // `tickProximity` é chamado pelo laço do Voice Core em produção; exposto
+  // porque o teste do relay precisa de um tick determinístico em vez de
+  // esperar o timer.
   tickProximity,
   calcVolume,
+  // O Voice Core, para quem precisa da camada de baixo (diagnóstico, teste, e
+  // o dia em que o backend LiveKit assumir o transporte).
+  voiceCore,
   // Papéis de conexão — o helper manda 'sender', a UI não manda nada e vira
   // 'listener'. Ver `voipClients` e VOICE_NATIVE_HELPER.md §10.
   VOIP_ROLES,
@@ -755,8 +955,8 @@ module.exports = {
   _ticketKey,
   _consumeAudioFrameQuota,
   _isCurrentClientSocket,
-  _audienceByActor,
   _voipClients: voipClients,
+  _openMicActors,
   _debugExposeTicketEnabled,
   VOIP_DEBUG_TICKET_FILE
 };

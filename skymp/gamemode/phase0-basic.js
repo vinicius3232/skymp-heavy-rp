@@ -64,6 +64,8 @@ const deathService  = require(path.join(gamemodeDir, 'death-service'));
 const professionService = require(path.join(gamemodeDir, 'profession-service'));
 const voipService   = require(path.join(gamemodeDir, 'voip-service'));
 const voiceEndpoint = require(path.join(gamemodeDir, 'core', 'voice', 'voice-endpoint'));
+const voiceSecurity = require(path.join(gamemodeDir, 'core', 'voice', 'voice-security'));
+const voiceStaffMute = require(path.join(gamemodeDir, 'core', 'voice', 'voice-staff-mute'));
 const soulService   = require(path.join(gamemodeDir, 'soul-service'));
 const nametagService = require(path.join(gamemodeDir, 'nametag-service'));
 const faunaCensus   = require(path.join(gamemodeDir, 'fauna-census'));
@@ -303,6 +305,45 @@ moduleRegistry.register({
   dependencies: [],
   commands: voipService.commandDefs(),
   initialize: async () => {
+    // Antes de qualquer coisa: o ambiente é defensável?
+    //
+    // Roda aqui, dentro do `initialize` do módulo de voz, e não no topo do
+    // arquivo, porque só faz sentido auditar a voz de um servidor que ligou a
+    // voz. Um servidor com `ENABLE_VOIP_SERVICE=false` não deve ser impedido de
+    // subir por causa de um `LIVEKIT_URL` mal preenchido que ele nunca vai usar.
+    //
+    // Achado FATAL derruba o processo. Isso NÃO contradiz "voz falhando não
+    // derruba o jogo": aquela regra é de runtime, e esta é de boot. Um SFU fora
+    // do ar não pode tirar o servidor do ar; um ambiente que vaza credencial não
+    // deve chegar a ter runtime. Subir com o aviso no log seria subir, e ninguém
+    // lê o log de boot de um servidor que subiu.
+    voiceSecurity.enforceAtBoot();
+
+    // Diagnóstico e ações de voz para a staff. Depois da auditoria de ambiente,
+    // de propósito: não faz sentido oferecer ferramenta de moderação de voz num
+    // servidor cujo ambiente de voz não passou.
+    voipService.bindAdminDiagnostics();
+
+    // Persistência do silêncio de staff (SV-07). Ligada aqui, e não na
+    // construção do módulo, porque a instância compartilhada precisa nascer sem
+    // banco para a suíte de testes rodar numa máquina sem MySQL.
+    //
+    // O `hydrate` roda ANTES de `startVoipServer`: um jogador que entrasse entre
+    // o servidor abrir e o registro carregar receberia token com
+    // `canPublish: true`, e a punição só valeria no recompute seguinte.
+    try {
+      voiceStaffMute.sharedVoiceStaffMute.setStore(voiceStaffMute.createMysqlStaffMuteStore());
+      const carga = await voiceStaffMute.sharedVoiceStaffMute.hydrate();
+      console.log(
+        carga.ok
+          ? `[voip] silêncio de staff: ${carga.loaded} punição(ões) ainda valendo`
+          : `[voip] ⚠️  silêncio de staff não carregou (${carga.reason}); punições desta execução não sobrevivem ao restart`
+      );
+    } catch (err) {
+      // Boot não cai por causa disto. Ver a mesma decisão dentro de `hydrate`.
+      console.warn(`[voip] ⚠️  persistência de silêncio indisponível: ${err && err.message}`);
+    }
+
     const voice = voiceEndpoint.describeBackend();
     console.log(
       `[voip] VOICE_BACKEND=${voice.backend} ` +
@@ -322,7 +363,25 @@ moduleRegistry.register({
     }
 
     voipService.startVoipServer();
-  }
+
+    // O Voice Core em voz alta no boot: intervalo do tick, tamanho de bucket e
+    // estado do gateway. Sem isto, "a voz está lenta" e "o LiveKit não está
+    // configurado" chegariam ao diagnóstico como a mesma frase.
+    const core = voipService.voiceCore.describe();
+    console.log(
+      `[voip] Voice Core: tick ${core.tickMs} ms, bucket ${core.spatial.bucketSize} u, ` +
+      `gateway ${core.gateway.state}` +
+      `${core.gateway.configured ? '' : ` (falta: ${core.gateway.missing.join(', ')})`}`
+    );
+  },
+  shutdown: async () => {
+    voipService.stopVoipServer();
+  },
+  // Saudável = o laço de proximidade está rodando. O gateway do LiveKit fora do
+  // ar NÃO conta como módulo doente: a voz degrada, o jogo não, e marcar o
+  // módulo como falho por causa de um SFU externo faria o diagnóstico apontar
+  // para o lugar errado.
+  healthCheck: () => voipService.voiceCore.describe().running
 });
 
 // LAB: Nametag visual — PROVA DE CONCEITO, uma etiqueta (o mais próximo).

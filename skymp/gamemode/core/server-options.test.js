@@ -146,13 +146,33 @@ describe('honestidade sobre o que não está implementado', () => {
     const known = new Set([...Object.keys(serverOptions.SPEC), ...serverOptions.DECLARED_BUT_UNWIRED]);
 
     const missing = [];
-    for (const [section, value] of Object.entries(example)) {
-      if (section.startsWith('_') || typeof value !== 'object' || value === null || Array.isArray(value)) continue;
-      for (const key of Object.keys(value)) {
-        const dottedPath = `${section}.${key}`;
-        if (!known.has(dottedPath)) missing.push(dottedPath);
+
+    /**
+     * Desce em QUALQUER profundidade.
+     *
+     * Até 14/08/2026 esta varredura descia exatamente dois níveis, porque todas
+     * as opções tinham exatamente dois. Quando `voice.downed.rangeModifier`
+     * nasceu, ela passou a acusar `voice.downed` — um objeto — como opção não
+     * classificada, e o `getAtPath` do módulo já lia caminho de qualquer
+     * tamanho. Era o teste que estava estreito, não a configuração que estava
+     * torta.
+     *
+     * A parada é na FOLHA: um nó que ainda é objeto não é uma opção, é uma
+     * seção. Chave começando com `_` é comentário do JSON e não entra.
+     */
+    const varrer = (valor, prefixo) => {
+      for (const [chave, filho] of Object.entries(valor)) {
+        if (chave.startsWith('_')) continue;
+        const dottedPath = prefixo ? `${prefixo}.${chave}` : chave;
+        if (filho !== null && typeof filho === 'object' && !Array.isArray(filho)) {
+          varrer(filho, dottedPath);
+        } else if (prefixo && !known.has(dottedPath)) {
+          missing.push(dottedPath);
+        }
       }
-    }
+    };
+    varrer(example, '');
+
     assert.deepEqual(missing, [], 'opções no exemplo que não foram classificadas em core/server-options.js');
   });
 });

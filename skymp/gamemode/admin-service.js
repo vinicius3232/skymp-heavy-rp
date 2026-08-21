@@ -10,6 +10,10 @@ const db = require('./database');
 const commands = require('./commands');
 const identity = require('./identity-service');
 const moderationLog = require('./core/moderation-log');
+// O registro COMPARTILHADO do processo. O Voice Core lê o mesmo; passá-lo entre
+// os dois exigiria que o sistema de staff conhecesse o de voz, o que é a
+// dependência na direção errada. Ver core/voice/voice-staff-mute.js.
+const { sharedVoiceStaffMute: voiceStaffMute } = require('./core/voice/voice-staff-mute');
 const { actorRef } = require('./core/papyrus');
 const skymp = require('./core/skymp-adapter');
 
@@ -66,10 +70,16 @@ const skymp = require('./core/skymp-adapter');
 // inofensivo o bastante para moderador — mas separar em duas permissões daria a
 // este projeto uma permissão a mais para justificar sem que ninguém tivesse
 // pedido, e as duas ferramentas rodam na mesma sessão, pela mesma pessoa.
+//
+// `voice_mute` fica no MODERADOR, ao lado de `kick`. É a ferramenta de quem
+// modera uma cena: silenciar quem está gritando por cima de todo mundo é
+// menos grave que expulsar, e exigir um admin para isso faria a moderação
+// escolher entre não fazer nada e expulsar. Ela não escreve no mundo nem no
+// banco — o silêncio vive em memória (ver core/voice/voice-staff-mute.js).
 const ROLE_PERMISSIONS = {
-  moderator: ['kick', 'teleport', 'view_audit', 'manage_whitelist'],
-  admin:     ['kick', 'teleport', 'view_audit', 'manage_whitelist', 'ban', 'add_item', 'set_gold', 'retire_character', 'manage_recipes', 'reveal_identity', 'run_world_probe'],
-  owner:     ['kick', 'teleport', 'view_audit', 'manage_whitelist', 'ban', 'add_item', 'set_gold', 'manage_staff', 'retire_character', 'manage_recipes', 'reveal_identity', 'run_world_probe']
+  moderator: ['kick', 'teleport', 'view_audit', 'manage_whitelist', 'voice_mute'],
+  admin:     ['kick', 'teleport', 'view_audit', 'manage_whitelist', 'ban', 'add_item', 'set_gold', 'retire_character', 'manage_recipes', 'reveal_identity', 'run_world_probe', 'voice_mute'],
+  owner:     ['kick', 'teleport', 'view_audit', 'manage_whitelist', 'ban', 'add_item', 'set_gold', 'manage_staff', 'retire_character', 'manage_recipes', 'reveal_identity', 'run_world_probe', 'voice_mute']
 };
 
 // Cache em memória: actorId → { role, permissions: Set<string> }
@@ -568,7 +578,257 @@ function sendDenied(actorId) {
   commands.sendNotification(actorId, '[Staff] Permissão negada.');
 }
 
+/**
+ * `/calar [actorId] [motivo]` — silencia a voz de um personagem.
+ * Permissão: `voice_mute`.
+ *
+ * ─── O que ele NÃO é ────────────────────────────────────────────────────────
+ *
+ * Não é o mute do jogador (`voice-state.setMuted`), que é conforto e a pessoa
+ * desfaz sozinha. Não é kick, não é ban, não é estado de personagem. É uma
+ * condição de voz, componível com todas as outras, e a pessoa **continua
+ * ouvindo** a cena — senão a punição vira desconexão disfarçada.
+ *
+ * ─── Não persiste, e isso está registrado ───────────────────────────────────
+ *
+ * O silêncio some no restart do servidor. Ver o cabeçalho de
+ * `core/voice/voice-staff-mute.js`.
+ *
+ * @param {number} actorId staff
+ * @param {number} targetActorId alvo
+ * @param {string} reason
+ * @param {number|null} [durationMinutes] `null` = até `/descalar`
+ */
+async function voiceMute(actorId, targetActorId, reason, durationMinutes = null) {
+  if (!hasPermission(actorId, 'voice_mute')) {
+    sendDenied(actorId);
+    return { ok: false, reason: 'sem permissão' };
+  }
+
+  const charData = commands.getActiveCharacterData(actorId);
+  const targetData = commands.getActiveCharacterData(targetActorId);
+  if (!targetData) {
+    commands.sendNotification(actorId, 'Alvo invalido.');
+    return { ok: false, reason: 'alvo sem personagem ativo' };
+  }
+
+  const durationMs = Number.isFinite(durationMinutes) && durationMinutes > 0
+    ? durationMinutes * 60_000
+    : null;
+
+  voiceStaffMute.mute(targetData.characterId, {
+    byCharacterId: charData ? charData.characterId : null,
+    reason,
+    durationMs
+  });
+
+  await auditLog(
+    charData?.accountId, targetData?.accountId, 'staff:voice_mute',
+    `role=${getRole(actorId)} reason=${reason} duration=${durationMinutes ?? 'indefinida'}`
+  );
+
+  commands.sendNotification(targetActorId, `Sua voz foi silenciada pela staff: ${reason}`);
+  commands.sendNotification(actorId, `Voz de ${nomeParaLog(targetData, targetActorId)} silenciada.`);
+  console.log(`[admin] ${actorId.toString(16)} (${getRole(actorId)}) silenciou a voz de ${targetActorId.toString(16)}: ${reason}`);
+
+  moderationLog.notify({
+    kind: 'voice_mute',
+    target: nomeParaLog(targetData, targetActorId),
+    moderator: nomeParaLog(charData, actorId),
+    reason
+  });
+
+  return { ok: true };
+}
+
+/**
+ * `/descalar [actorId]` — devolve a voz.
+ * Permissão: `voice_mute` — a mesma que tirou. Uma permissão separada para
+ * desfazer criaria a situação em que quem silenciou não pode reverter.
+ *
+ * @param {number} actorId staff
+ * @param {number} targetActorId alvo
+ */
+async function voiceUnmute(actorId, targetActorId) {
+  if (!hasPermission(actorId, 'voice_mute')) {
+    sendDenied(actorId);
+    return { ok: false, reason: 'sem permissão' };
+  }
+
+  const charData = commands.getActiveCharacterData(actorId);
+  const targetData = commands.getActiveCharacterData(targetActorId);
+  if (!targetData) {
+    commands.sendNotification(actorId, 'Alvo invalido.');
+    return { ok: false, reason: 'alvo sem personagem ativo' };
+  }
+
+  const result = voiceStaffMute.unmute(targetData.characterId);
+  await auditLog(charData?.accountId, targetData?.accountId, 'staff:voice_unmute', `role=${getRole(actorId)}`);
+
+  if (result.changed) commands.sendNotification(targetActorId, 'Sua voz foi liberada pela staff.');
+  commands.sendNotification(actorId, result.changed
+    ? `Voz de ${nomeParaLog(targetData, targetActorId)} liberada.`
+    : 'Esse personagem nao estava silenciado.');
+
+  return { ok: true, changed: result.changed };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Diagnóstico e ciclo de vida da voz
+//
+// As três ações abaixo compartilham uma decisão: elas mexem no TRANSPORTE de voz
+// de alguém, nunca no personagem e nunca na presença no jogo. Um cliente de voz
+// travado — cadeia de áudio duplicada, sessão zumbi, helper que parou de
+// responder — se resolve derrubando a voz, e derrubar o jogador junto seria uma
+// punição que ele não recebeu.
+//
+// Por isso elas ficam em `voice_mute` e não em `kick`: quem pode calar pode
+// destravar, e quem pode expulsar é outra conversa.
+//
+// **Toda uma delas gera audit log, inclusive a consulta.** Consultar o
+// diagnóstico de um jogador é olhar o estado de voz dele; num sistema de
+// moderação, quem olhou também é registro.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Injeção do diagnóstico.
+ *
+ * O `admin-service` NÃO importa o Voice Core. A direção da dependência é a
+ * mesma que `voice-staff-mute` protege: staff não conhece voz. Quem liga os dois
+ * é o `voip-service`, que já é dono do Voice Core, chamando isto no boot.
+ *
+ * Sem injeção, as três ações respondem "voz não disponível" — que é a verdade
+ * num servidor com `ENABLE_VOIP_SERVICE=false`.
+ *
+ * @type {{forActor: Function, overview: Function, roster: Function, disconnect: Function, forceReconnect: Function, summaryLine: Function}|null}
+ */
+let voiceDiagnostics = null;
+
+/** @param {any} diagnostics */
+function bindVoiceDiagnostics(diagnostics) {
+  voiceDiagnostics = diagnostics;
+}
+
+function _semVoz(actorId) {
+  commands.sendNotification(actorId, 'O sistema de voz nao esta ativo neste servidor.');
+  return { ok: false, reason: 'voz não disponível' };
+}
+
+/**
+ * `/vozdiag [actorId]` — o estado de voz de um jogador, com o motivo.
+ *
+ * Permissão: `voice_mute`. Responde "por que fulano não está sendo ouvido?", que
+ * sem isto se responde abrindo o log do servidor com `grep`.
+ *
+ * @param {number} actorId staff
+ * @param {number} targetActorId alvo
+ */
+async function voiceDiagnose(actorId, targetActorId) {
+  if (!hasPermission(actorId, 'voice_mute')) {
+    sendDenied(actorId);
+    return { ok: false, reason: 'sem permissão' };
+  }
+  if (!voiceDiagnostics) return _semVoz(actorId);
+
+  const charData = commands.getActiveCharacterData(actorId);
+  const targetData = commands.getActiveCharacterData(targetActorId);
+  const report = voiceDiagnostics.forActor(targetActorId);
+  const resumo = voiceDiagnostics.summaryLine(targetActorId);
+
+  await auditLog(
+    charData?.accountId, targetData?.accountId, 'staff:voice_diagnostics',
+    `role=${getRole(actorId)} ${resumo}`
+  );
+
+  commands.sendNotification(actorId,
+    `Voz de ${nomeParaLog(targetData, targetActorId)}: ` +
+    `${report.voiceConnected ? 'conectada' : 'DESCONECTADA'} (${report.reconnectState}), ` +
+    `modo ${report.voiceMode ?? '-'}, ` +
+    `${report.staffMuted ? 'SILENCIADA pela staff, ' : ''}` +
+    `${report.canSpeakNow ? 'pode falar' : `nao pode falar: ${report.reason}`}`
+  );
+  console.log(`[admin] ${actorId.toString(16)} consultou voz de ${targetActorId.toString(16)}: ${resumo}`);
+
+  return { ok: true, report };
+}
+
+/**
+ * `/vozdesconectar [actorId] [motivo]` — derruba a voz sem tirar do jogo.
+ *
+ * @param {number} actorId staff
+ * @param {number} targetActorId alvo
+ * @param {string} [reason]
+ */
+async function voiceDisconnect(actorId, targetActorId, reason = 'sem motivo registrado') {
+  if (!hasPermission(actorId, 'voice_mute')) {
+    sendDenied(actorId);
+    return { ok: false, reason: 'sem permissão' };
+  }
+  if (!voiceDiagnostics) return _semVoz(actorId);
+
+  const charData = commands.getActiveCharacterData(actorId);
+  const targetData = commands.getActiveCharacterData(targetActorId);
+  const result = voiceDiagnostics.disconnect(targetActorId, reason);
+
+  // Registra mesmo quando não havia voz a derrubar: a TENTATIVA é o ato de
+  // moderação, e um audit log que só grava sucesso esconde metade do que a staff
+  // fez.
+  await auditLog(
+    charData?.accountId, targetData?.accountId, 'staff:voice_disconnect',
+    `role=${getRole(actorId)} reason=${reason} ok=${result.ok}${result.ok ? '' : ` motivo=${result.reason}`}`
+  );
+
+  if (!result.ok) {
+    commands.sendNotification(actorId, 'Esse jogador nao esta na voz.');
+    return result;
+  }
+
+  commands.sendNotification(targetActorId, 'Sua conexao de voz foi encerrada pela staff. Use /voz para reconectar.');
+  commands.sendNotification(actorId, `Voz de ${nomeParaLog(targetData, targetActorId)} desconectada.`);
+  console.log(`[admin] ${actorId.toString(16)} (${getRole(actorId)}) desconectou a voz de ${targetActorId.toString(16)}: ${reason}`);
+
+  return result;
+}
+
+/**
+ * `/vozreconectar [actorId]` — reemite o token mantendo a identidade.
+ *
+ * Não é desconectar e reconectar: manter a identidade preserva as assinaturas
+ * que os outros já têm. É a ação para "o áudio dele parou mas ele ainda está lá".
+ *
+ * @param {number} actorId staff
+ * @param {number} targetActorId alvo
+ */
+async function voiceForceReconnect(actorId, targetActorId) {
+  if (!hasPermission(actorId, 'voice_mute')) {
+    sendDenied(actorId);
+    return { ok: false, reason: 'sem permissão' };
+  }
+  if (!voiceDiagnostics) return _semVoz(actorId);
+
+  const charData = commands.getActiveCharacterData(actorId);
+  const targetData = commands.getActiveCharacterData(targetActorId);
+  const result = voiceDiagnostics.forceReconnect(targetActorId);
+
+  await auditLog(
+    charData?.accountId, targetData?.accountId, 'staff:voice_force_reconnect',
+    `role=${getRole(actorId)} ok=${result.ok} transport=${result.transport ?? '-'}` +
+    `${result.ok ? '' : ` motivo=${result.reason}`}`
+  );
+
+  commands.sendNotification(actorId, result.ok
+    ? `Voz de ${nomeParaLog(targetData, targetActorId)} reconectada${result.note ? ` (${result.note})` : ''}.`
+    : `Nao foi possivel reconectar: ${result.reason}`);
+  console.log(`[admin] ${actorId.toString(16)} forcou reconexao de voz de ${targetActorId.toString(16)}: ok=${result.ok}`);
+
+  return result;
+}
+
 module.exports = {
+  bindVoiceDiagnostics,
+  voiceDiagnose,
+  voiceDisconnect,
+  voiceForceReconnect,
   registerStaffRole,
   removeStaffRole,
   hasPermission,
@@ -580,5 +840,7 @@ module.exports = {
   kickPlayer,
   setGold,
   retireCharacter,
-  revealIdentity
+  revealIdentity,
+  voiceMute,
+  voiceUnmute
 };

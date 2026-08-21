@@ -6,6 +6,7 @@
   "dependencies": [
     "miniaudio",
     "ixwebsocket",
-    "nlohmann-json"
+    "nlohmann-json",
+    "opus"
   ]
 }
