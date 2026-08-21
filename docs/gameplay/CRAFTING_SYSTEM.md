@@ -1,10 +1,16 @@
 # Sistema de crafting
 
-**Estado: PARKED.** `crafting-service.js` **não** está no
-`core/module-registry.js` e não roda. Esta rodada **migrou** o serviço para o
-Inventory Framework e corrigiu duas afirmações falsas no código —
-migrar não é reativar, e misturar as duas é o erro que a Fase 2 do `QA_REPORT`
-existe para não repetir.
+**Estado: ATIVO (lab), reativado em 20/08/2026.** `crafting-service.js` está
+registrado em `core/module-registry.js` como módulo `crafting`
+(`ENABLE_CRAFTING_SERVICE`, nasce desligado como todo `lab`). A reativação
+ganhou o que faltava desde a migração para o Inventory Framework: comandos de
+chat (`/craft`, `/receitas`, `/addrecipe`, `/addingredient`) e um gate real de
+profissão/rank por receita (`required_profession`/`required_rank`,
+migration-v20-crafting-profession-gate.sql), checado dentro de `craftItem()` —
+ao contrário de `requires_perk`, que continua lido e nunca comparado. Nenhuma
+receita muda comportamento sozinha: o gate é NULL (livre) por padrão, e é a
+staff que amarra via `/addrecipe`. Subiu no boot local sem erro; **nunca
+rodou numa sessão real com cliente conectado.**
 
 Arquivo: [`crafting-service.js`](../../skymp/gamemode/crafting-service.js).
 
@@ -176,13 +182,18 @@ sobreviver ao restart.
 
 ## 7. O que NÃO está feito
 
-- **O serviço continua PARKED.** Não está no `module-registry`.
 - **Perk não é validado**, apesar da coluna existir.
 - **Proximidade de estação não é validada** (§5).
-- **Não há qualidade, profissão, skill nem ferramenta** (§3).
+- **Profissão/rank agora É validado** (20/08/2026) — ver o topo deste
+  documento e `migration-v20-crafting-profession-gate.sql`. Skill e ferramenta
+  continuam de fora (§3).
 - **Não há fila nem duração** (§6) — por escolha.
 - **Não há interação `craft.open`/`craft.execute`** (§5).
 - **Não há UI.**
+- **Nenhuma receita de FORJAR arma/armadura existe** — `seed-forging.sql`
+  só tem receitas de *derreter* sucata (Fundidor) e uma de curtume
+  (Curtidor). O Ferreiro (`blacksmith`) tem o gate pronto e zero receita:
+  falta um `result_base_id` de arma/armadura confirmado, não inventado.
 - **Nunca rodou numa sessão real.**
 
 ## 8. Cobertura

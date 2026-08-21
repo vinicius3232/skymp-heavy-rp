@@ -8,6 +8,8 @@ Este documento existe pra que a decisão seja tomada com dados em vez de por ac�
 
 **Segunda rodada, 06/08/2026 (§7).** Os três classificados como "independentes, coerentes" — `crafting`, `jobs`, `disguise` — foram reavaliados com dado que não existia na primeira: o `identity-service` ganhou testes, o `player-panel-service` passou a existir com aba Social, e a Afinidade da Alma fechou o desenho. Resultado: `disguise-service` **apagado** (quinto), `crafting` e `jobs` mantidos estacionados mas **com a mesma dívida do item 2, em item em vez de ouro**. A §6 abaixo está corrigida por §7 — leia as duas.
 
+**Terceira rodada, 20/08/2026 — reativação.** `jobs-service`, `contracts-service` e `crafting-service` deixaram de ser PARKED: os três estão registrados em `core/module-registry.js` (fase `lab`, flag própria, desligados por padrão) e ganharam a camada de comando/gate que faltava desde §7 — `jobs` e `crafting` já tinham a dívida de item corrigida, mas nenhum dos três tinha comando de chat nem, no caso de `crafting`, gate de profissão real. Ver [`CRAFTING_SYSTEM.md`](../gameplay/CRAFTING_SYSTEM.md) e [`CONTRACTS.md`](../gameplay/CONTRACTS.md) para o estado atual de cada um. `contracts-service` não estava nesta lista original — nunca foi avaliado nas duas primeiras rodadas, só existia no disco. Nenhum dos três foi visto num servidor com gente dentro ainda; a análise abaixo (§1–§9) descreve o estado ANTES da reativação e continua correta para o histórico — a tabela no item "Situação" está desatualizada quanto a PARKED, não quanto ao resto.
+
 Levantado em 05/08/2026.
 
 ---

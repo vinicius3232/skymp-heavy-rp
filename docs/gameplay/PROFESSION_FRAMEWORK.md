@@ -252,14 +252,22 @@ integração contra um banco real prova isso.
 - Resource Node Framework: **motor implementado**, sem consumidor — ver
   [RESOURCE_NODE_FRAMEWORK.md](RESOURCE_NODE_FRAMEWORK.md). Nenhum nó está
   ligado a um objeto real do mundo ainda.
-- Minerador, Lenhador, Caçador, Fazendeiro — qualquer gameplay de coleta
-- Fundidor, Ferreiro, Curtidor, Encantador, Cozinheiro — crafting ligado a
-  profissão/rank (o `crafting-service.js` PARKED existente é candidato a
-  reativação numa fase futura, não desta)
+- Minerador — **tem gameplay** desde antes desta rodada, via `mining-service.js`
+  (interação `mining.mine` sobre o Resource Node Framework). Lenhador, Caçador,
+  Fazendeiro continuam sem coleta própria — só `jobs-service.js` (trabalho
+  livre, sem profissão) cobre lenha/minério/peixe hoje.
+- Fundidor, Curtidor — **têm gameplay** desde 20/08/2026: `crafting-service.js`
+  foi reativado (ver [CRAFTING_SYSTEM.md](CRAFTING_SYSTEM.md)) com gate de
+  profissão/rank real (`required_profession`/`required_rank`,
+  migration-v20-crafting-profession-gate.sql) e receita cadastrada em
+  `seed-forging.sql`. **Ferreiro, Encantador, Cozinheiro têm o gate pronto e
+  zero receita** — o mecanismo existe, falta conteúdo (um `result_base_id` de
+  arma/armadura/item confirmado, não inventado).
 - Tratador de Cavalos, Taberneiro — qualquer integração com `horse-service.js`
   ou economia de taverna
-- Mensageiro — Contract Framework (o `contracts-service.js` PARKED existente,
-  jogador↔jogador, é o precedente mais próximo — sem NPC ainda)
+- Mensageiro — Contract Framework: `contracts-service.js` foi reativado em
+  20/08/2026 (ver [CONTRACTS.md](CONTRACTS.md)), mas continua jogador↔jogador,
+  sem NPC
 - Guarda — qualquer poder administrativo/IC (permanece 100% em
   `governance-service.js`)
 - Qualquer UI CEF para profissão
