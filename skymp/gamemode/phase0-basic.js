@@ -61,6 +61,7 @@ const governance    = require(path.join(gamemodeDir, 'governance-service'));
 const marketStalls  = require(path.join(gamemodeDir, 'market-stalls-service'));
 const playerPanel   = require(path.join(gamemodeDir, 'player-panel-service'));
 const deathService  = require(path.join(gamemodeDir, 'death-service'));
+const professionService = require(path.join(gamemodeDir, 'profession-service'));
 const voipService   = require(path.join(gamemodeDir, 'voip-service'));
 const voiceEndpoint = require(path.join(gamemodeDir, 'core', 'voice', 'voice-endpoint'));
 const soulService   = require(path.join(gamemodeDir, 'soul-service'));
@@ -210,6 +211,22 @@ moduleRegistry.register({
   shutdown: async () => {
     governance.shutdownGovernanceService();
   }
+});
+
+// LAB: Profession Core — só o núcleo (grant/revoke/rank/xp). Nenhuma
+// profissão tem gameplay implementado ainda; ver core/profession-registry.js.
+// As ações administrativas (`/setprofissao` etc.) ficam por conta do PR de
+// Admin — este flag não controla se elas EXISTEM, controla se
+// `profession-service.js` aceita executá-las e se o comando de jogador
+// `/profissoes` é registrado.
+moduleRegistry.register({
+  id: 'profession',
+  enabledBy: 'ENABLE_PROFESSION_SERVICE',
+  phase: 'lab',
+  version: '1.0.0',
+  dependencies: [],
+  commands: professionService.commandDefs(),
+  initialize: async () => {}
 });
 
 moduleRegistry.register({
