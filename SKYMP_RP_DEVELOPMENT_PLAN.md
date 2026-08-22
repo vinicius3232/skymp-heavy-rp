@@ -552,7 +552,8 @@ Rodar o projeto de forma sustentavel.
 
 - Documento de regras publicas: `docs/rules/HEAVY_RP_RULES.md`.
 - Esboco consolidado de regras publicas: `docs/rules/PUBLIC_RULES_LAUNCH_OUTLINE.md`.
-- Evidencias dos testes da Fase 0: `docs/roadmap/PHASE_0_TEST_LOG.md`.
+- Evidencias do primeiro boot (11/07/2026, historico): `docs/historico/PHASE_0_TEST_LOG.md`.
+- Roteiro de teste in-game em vigor: `docs/technical/FASE_0_ROTEIRO.md`; log ativo: `docs/roadmap/FASE_0_LOG_2026-08-06.md`.
 - Modelo de aplicacao de personagem: `docs/rules/CHARACTER_APPLICATION_TEMPLATE.md`.
 - Rubrica de whitelist da staff: `docs/staff/WHITELIST_RUBRIC.md`.
 - Estudo de referencias tecnicas: `docs/technical/REFERENCE_STUDY_SKYMP_RED_HOUSE.md`.
