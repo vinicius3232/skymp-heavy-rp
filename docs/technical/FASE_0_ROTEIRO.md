@@ -187,6 +187,7 @@ A parte mais nova e menos verificada do gamemode.
 | 5.5 | Repita 5.1 e **espere 4 minutos** | A vira `DEAD`, perde ouro, respawna | — |
 | 5.6 | Confira `gold_transactions` | Linha da penalidade, saldo nunca negativo | — |
 | 5.7 | `action='death:context'` | Lista quem estava por perto | Evidência anti-RDM |
+| 5.8 | Repita 5.1 e, com A em `DOWNED` (bleed-out correndo, **sem** `/socorrer`), A desconecta e reconecta | A **continua `DOWNED`** ao voltar — o estado do `death-service` prevalece, sem respawn silencioso do motor | Se A voltar `NORMAL`/respawnado, é `PartOne::SetUserActor` chamando `RespawnWithDelay()` no handshake, por fora do `DeathEvent` — mesma classe de bug que a PR #21 corrigiu no caminho principal, só que na reconexão. **Registrar como achado novo**, não assumir que já está coberto |
 
 **Anote o tempo real entre 5.1 e o `DOWNED` aparecer.** Se passar de 2 s, o hook nativo não está sendo usado.
 
