@@ -5,6 +5,7 @@ const adminService = require('./admin-service');
 const characterState = require('./core/character-state');
 const serverOptions = require('./core/server-options');
 const transactionService = require('./core/transaction-service');
+const economyPhysicalSync = require('./core/economy-physical-sync');
 // NOTA: nenhum módulo PARKED é importado aqui. Eles são inicializados
 // exclusivamente pelo module-registry quando a flag ENABLE_* correspondente
 // está ligada — importar direto no boot os faria rodar sem passar pelo registry.
@@ -200,6 +201,13 @@ async function checkWhitelist(userId, profileId, actorId) {
 
     await grantStartingGold(character.id);
     await revelarPrimeiroSinal(character.id);
+
+    // Anti-cheat de ouro físico (Gold001 nunca deveria existir no inventário
+    // — ver core/economy-physical-sync.js). Não bloqueia login por design,
+    // mesma filosofia de grantStartingGold acima.
+    economyPhysicalSync.reconcileOnLogin(actorId, character.id).catch((err) => {
+      console.error(`[whitelist] Falha no anti-cheat de ouro físico para ${character.id}:`, err.message);
+    });
 
     // 5. Atualizar posição do jogador in-game a partir do banco de dados
     if (typeof mp !== 'undefined' && actorId) {

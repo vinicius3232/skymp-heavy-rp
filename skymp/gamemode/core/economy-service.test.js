@@ -27,6 +27,34 @@ const economy = require('./economy-service');
 // Harness
 // ─────────────────────────────────────────────────────────────────────────────
 
+/**
+ * Fila de travas por linha — simula o bloqueio real de `SELECT ... FOR
+ * UPDATE` do InnoDB: uma segunda transação pedindo a MESMA linha espera até a
+ * primeira liberar (commit/rollback), em vez de ler o valor "ao vivo" sem
+ * fila. Sem isto, `Promise.all` de transferências concorrentes sobre a mesma
+ * linha nunca contenderia de verdade — o mock passaria mesmo se o código
+ * tivesse um lost-update de verdade, porque nada aqui bloquearia a segunda
+ * leitura enquanto a primeira transação ainda está "aberta".
+ *
+ * Existe só para os testes de concorrência (Tarefa 7, §5) — os outros 30
+ * testes deste arquivo chamam uma operação de cada vez, então a fila nunca
+ * chega a ter uma segunda espera; o comportamento delas não muda.
+ */
+function makeLockQueue() {
+  const tails = new Map(); // rowKey -> promise da última trava pendente/ativa
+  return {
+    /** Resolve quando a trava é concedida; devolve a função de liberação. */
+    async acquire(rowKey) {
+      const previousTail = tails.get(rowKey) || Promise.resolve();
+      let release;
+      const myTurn = new Promise((resolve) => { release = resolve; });
+      tails.set(rowKey, previousTail.then(() => myTurn));
+      await previousTail;
+      return release;
+    }
+  };
+}
+
 function makeHarness(options = {}) {
   const state = {
     gold: { ...(options.gold || {}) },
@@ -35,7 +63,8 @@ function makeHarness(options = {}) {
     ledger: [],
     locks: [],        // ordem em que as linhas foram travadas (FOR UPDATE)
     events: [],       // begin / commit / rollback / release
-    committed: false
+    committed: false,
+    lockQueue: makeLockQueue()
   };
 
   function insertLedger(params) {
@@ -60,101 +89,155 @@ function makeHarness(options = {}) {
     state.ledger.push(row);
   }
 
-  const conn = {
-    beginTransaction: async () => { state.events.push('begin'); },
-    commit: async () => { state.events.push('commit'); state.committed = true; },
-    rollback: async () => { state.events.push('rollback'); },
-    release: () => { state.events.push('release'); },
-    query: async (sql, params = []) => {
-      if (options.failOn && new RegExp(options.failOn, 'i').test(sql)) {
-        throw new Error('conexao com o banco caiu');
-      }
+  /**
+   * Cria uma "conexão" nova por chamada de `getConnection()` — como o pool
+   * real faz — mas todas compartilham `state`. Cada uma mantém as próprias
+   * travas concedidas (`heldLocks`) e as libera no `commit`/`rollback`, nunca
+   * antes: é isso que faz uma segunda transação pedindo a MESMA linha
+   * bloquear em `acquireRowLock` até a primeira soltar.
+   */
+  function makeConn() {
+    const heldLocks = [];
+    // Linhas que ESTA conexão já trava. Sem isto, uma segunda trava da MESMA
+    // linha dentro da MESMA transação (ex: `_lockPair` trava o personagem
+    // alvo, depois `transaction-service.tx.applyGoldDelta` trava a MESMA
+    // linha de novo) esperaria a fila liberar essa linha — e quem a liberaria
+    // é o próprio `commit()`, que não roda até esta segunda trava resolver.
+    // Autodeadlock. O InnoDB real é reentrante por transação: quem já é dono
+    // não espera a própria trava. Isto replica esse comportamento.
+    const heldRowKeys = new Set();
 
-      // ── Ledger ──────────────────────────────────────────────────────────
-      if (/FROM gold_transactions WHERE idempotency_key = \? FOR UPDATE/i.test(sql)) {
-        const found = state.ledger.find(l => l.idempotencyKey === params[0]);
-        return [found ? [{
-          transfer_id: found.transferId, delta: found.delta,
-          owner_type: found.ownerType, owner_ref: found.ownerRef,
-          counterparty_type: found.counterpartyType, counterparty_ref: found.counterpartyRef
-        }] : []];
-      }
-      if (/INSERT INTO gold_transactions/i.test(sql)) {
-        insertLedger(params);
-        return [{ affectedRows: 1 }];
-      }
-
-      // ── Escrow ──────────────────────────────────────────────────────────
-      if (/SELECT escrow_id, balance, status FROM economy_escrow WHERE idempotency_key/i.test(sql)) {
-        const found = [...state.escrows.values()].find(e => e.idempotency_key === params[0]);
-        return [found ? [{ escrow_id: found.escrow_id, balance: found.balance, status: found.status }] : []];
-      }
-      if (/SELECT escrow_id, funder_type, funder_ref, balance, status FROM economy_escrow/i.test(sql)) {
-        const found = state.escrows.get(params[0]);
-        state.locks.push(`escrow:${params[0]}`);
-        return [found ? [{ ...found }] : []];
-      }
-      if (/SELECT balance AS balance FROM economy_escrow WHERE escrow_id = \? FOR UPDATE/i.test(sql)) {
-        const found = state.escrows.get(params[0]);
-        state.locks.push(`escrow:${params[0]}`);
-        return [found ? [{ balance: found.balance }] : []];
-      }
-      if (/INSERT INTO economy_escrow/i.test(sql)) {
-        state.escrows.set(params[0], {
-          escrow_id: params[0], purpose: params[1],
-          funder_type: params[2], funder_ref: params[3],
-          balance: 0, status: 'held', idempotency_key: params[4]
-        });
-        return [{ affectedRows: 1 }];
-      }
-      if (/UPDATE economy_escrow SET balance = balance \+ \?/i.test(sql)) {
-        const found = state.escrows.get(params[1]);
-        if (!found || found.balance + params[0] < 0) return [{ affectedRows: 0 }];
-        found.balance += params[0];
-        return [{ affectedRows: 1 }];
-      }
-      if (/UPDATE economy_escrow SET status = \?/i.test(sql)) {
-        const found = state.escrows.get(params[1]);
-        if (!found || found.status !== params[2]) return [{ affectedRows: 0 }];
-        found.status = params[0];
-        return [{ affectedRows: 1 }];
-      }
-
-      // ── Personagem ──────────────────────────────────────────────────────
-      if (/SELECT gold AS balance FROM characters WHERE id = \? FOR UPDATE/i.test(sql)
-        || /SELECT gold FROM characters WHERE id = \? FOR UPDATE/i.test(sql)) {
-        state.locks.push(`character:${params[0]}`);
-        const value = state.gold[params[0]];
-        return [value === undefined ? [] : [{ gold: value, balance: value }]];
-      }
-      if (/UPDATE characters SET gold = gold \+ \?/i.test(sql)) {
-        state.gold[params[1]] = (state.gold[params[1]] || 0) + params[0];
-        return [{ affectedRows: 1 }];
-      }
-
-      // ── Tesouros ────────────────────────────────────────────────────────
-      const treasurySelect = /SELECT treasury AS balance FROM (cities|holds|factions|realms) WHERE id = \? FOR UPDATE/i.exec(sql);
-      if (treasurySelect) {
-        const key = `${treasurySelect[1]}:${params[0]}`;
-        state.locks.push(key);
-        const value = state.treasury[key];
-        return [value === undefined ? [] : [{ balance: value }]];
-      }
-      const treasuryUpdate = /UPDATE (cities|holds|factions|realms) SET treasury = treasury \+ \?/i.exec(sql);
-      if (treasuryUpdate) {
-        const key = `${treasuryUpdate[1]}:${params[1]}`;
-        if (state.treasury[key] === undefined || state.treasury[key] + params[0] < 0) return [{ affectedRows: 0 }];
-        state.treasury[key] += params[0];
-        return [{ affectedRows: 1 }];
-      }
-
-      throw new Error(`SQL inesperado: ${sql}`);
+    async function acquireRowLock(rowKey) {
+      if (heldRowKeys.has(rowKey)) return;
+      const release = await state.lockQueue.acquire(rowKey);
+      heldRowKeys.add(rowKey);
+      heldLocks.push(release);
+      state.locks.push(rowKey);
     }
-  };
+
+    function releaseAllLocks() {
+      while (heldLocks.length > 0) heldLocks.pop()();
+    }
+
+    return {
+      beginTransaction: async () => { state.events.push('begin'); },
+      commit: async () => { state.events.push('commit'); state.committed = true; releaseAllLocks(); },
+      rollback: async () => { state.events.push('rollback'); releaseAllLocks(); },
+      release: () => { state.events.push('release'); },
+      query: async (sql, params = []) => {
+        if (options.failOn && new RegExp(options.failOn, 'i').test(sql)) {
+          throw new Error('conexao com o banco caiu');
+        }
+
+        // ── Ledger ──────────────────────────────────────────────────────────
+        if (/FROM gold_transactions WHERE idempotency_key = \? FOR UPDATE/i.test(sql)) {
+          const found = state.ledger.find(l => l.idempotencyKey === params[0]);
+          return [found ? [{
+            transfer_id: found.transferId, delta: found.delta,
+            owner_type: found.ownerType, owner_ref: found.ownerRef,
+            counterparty_type: found.counterpartyType, counterparty_ref: found.counterpartyRef
+          }] : []];
+        }
+        if (/INSERT INTO gold_transactions/i.test(sql)) {
+          insertLedger(params);
+          return [{ affectedRows: 1 }];
+        }
+        if (/INSERT INTO audit_logs/i.test(sql)) {
+          state.auditLogs = state.auditLogs || [];
+          state.auditLogs.push({ action: params[0], actorAccountId: params[1], targetAccountId: params[2], details: params[3] });
+          return [{ affectedRows: 1 }];
+        }
+
+        // ── Escrow ──────────────────────────────────────────────────────────
+        if (/SELECT escrow_id, balance, status FROM economy_escrow WHERE idempotency_key/i.test(sql)) {
+          const found = [...state.escrows.values()].find(e => e.idempotency_key === params[0]);
+          return [found ? [{ escrow_id: found.escrow_id, balance: found.balance, status: found.status }] : []];
+        }
+        if (/SELECT escrow_id, funder_type, funder_ref, balance, status FROM economy_escrow/i.test(sql)) {
+          await acquireRowLock(`escrow:${params[0]}`);
+          const found = state.escrows.get(params[0]);
+          return [found ? [{ ...found }] : []];
+        }
+        if (/SELECT balance AS balance FROM economy_escrow WHERE escrow_id = \? FOR UPDATE/i.test(sql)) {
+          await acquireRowLock(`escrow:${params[0]}`);
+          const found = state.escrows.get(params[0]);
+          return [found ? [{ balance: found.balance }] : []];
+        }
+        if (/INSERT INTO economy_escrow/i.test(sql)) {
+          state.escrows.set(params[0], {
+            escrow_id: params[0], purpose: params[1],
+            funder_type: params[2], funder_ref: params[3],
+            balance: 0, status: 'held', idempotency_key: params[4]
+          });
+          return [{ affectedRows: 1 }];
+        }
+        if (/UPDATE economy_escrow SET balance = balance \+ \?/i.test(sql)) {
+          const found = state.escrows.get(params[1]);
+          if (!found || found.balance + params[0] < 0) return [{ affectedRows: 0 }];
+          found.balance += params[0];
+          return [{ affectedRows: 1 }];
+        }
+        if (/UPDATE economy_escrow SET status = \?/i.test(sql)) {
+          const found = state.escrows.get(params[1]);
+          if (!found || found.status !== params[2]) return [{ affectedRows: 0 }];
+          found.status = params[0];
+          return [{ affectedRows: 1 }];
+        }
+
+        // ── Personagem ──────────────────────────────────────────────────────
+        if (/SELECT gold AS balance FROM characters WHERE id = \? FOR UPDATE/i.test(sql)
+          || /SELECT gold FROM characters WHERE id = \? FOR UPDATE/i.test(sql)) {
+          await acquireRowLock(`character:${params[0]}`);
+          const value = state.gold[params[0]];
+          return [value === undefined ? [] : [{ gold: value, balance: value }]];
+        }
+        if (/UPDATE characters SET gold = gold \+ \?/i.test(sql)) {
+          state.gold[params[1]] = (state.gold[params[1]] || 0) + params[0];
+          return [{ affectedRows: 1 }];
+        }
+
+        // ── Tesouros ────────────────────────────────────────────────────────
+        const treasurySelect = /SELECT treasury AS balance FROM (cities|holds|factions|realms) WHERE id = \? FOR UPDATE/i.exec(sql);
+        if (treasurySelect) {
+          const key = `${treasurySelect[1]}:${params[0]}`;
+          await acquireRowLock(key);
+          const value = state.treasury[key];
+          return [value === undefined ? [] : [{ balance: value }]];
+        }
+        const treasuryUpdate = /UPDATE (cities|holds|factions|realms) SET treasury = treasury \+ \?/i.exec(sql);
+        if (treasuryUpdate) {
+          const key = `${treasuryUpdate[1]}:${params[1]}`;
+          if (state.treasury[key] === undefined || state.treasury[key] + params[0] < 0) return [{ affectedRows: 0 }];
+          state.treasury[key] += params[0];
+          return [{ affectedRows: 1 }];
+        }
+
+        throw new Error(`SQL inesperado: ${sql}`);
+      }
+    };
+  }
+
+  // Conexão padrão: um único objeto reaproveitado por todo `getConnection()`,
+  // como o comportamento original deste harness. Suficiente pra tudo que roda
+  // uma operação de cada vez, e é o que o teste de "consulta de replay dentro
+  // da transacao" precisa (ele troca `h.conn.query` antes de chamar
+  // `economy.transfer` e espera que seja a MESMA conexão usada por dentro).
+  const conn = makeConn();
 
   return {
     state,
     conn,
+    // Exposto só para os testes de concorrência: uma `db` cuja
+    // `getConnection()` devolve uma conexão NOVA a cada chamada (como o pool
+    // real), para que duas `transfer()` concorrentes sejam duas transações
+    // de verdade, cada uma com suas próprias travas — ver `makeLockQueue`.
+    makeConcurrentDb: () => ({
+      getConnection: async () => makeConn(),
+      query: async (sql, params = []) => {
+        const [rows] = await makeConn().query(sql, params);
+        return rows;
+      }
+    }),
     dependencies: {
       db: {
         getConnection: async () => conn,
@@ -665,5 +748,95 @@ describe('economy-service — reconciliacao', () => {
     assert.strictEqual(soma, 42);
     assert.strictEqual(h.state.treasury['cities:whiterun'], 42,
       'saldo e ledger precisam contar a mesma historia — e o que o Achado 2 tornava impossivel');
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Concorrência (Tarefa 7 — "The Vault", §5: inflação e duplicação)
+//
+// O harness aplica `UPDATE ... SET gold = gold + ?` como incremento atômico ao
+// vivo (lê `state.gold[id]` no MOMENTO da escrita, não um valor lido antes) —
+// mesma semântica do `UPDATE` relativo que o MySQL real faz por linha, mesmo
+// sem `FOR UPDATE`. O que os dois testes abaixo provam é que a interleaving de
+// `Promise.all` (cada `transfer()` faz várias idas assíncronas ao "banco", e o
+// event loop intercala as chamadas concorrentes entre esses pontos) não perde
+// nenhuma perna do ledger nem deixa o saldo divergir — a garantia concreta que
+// a Tarefa 7 pede. Só um teste de integração contra MySQL real prova travas
+// (`FOR UPDATE`) de verdade sob concorrência de processo — mesma limitação já
+// documentada no topo deste arquivo para os outros blocos de teste.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('economy-service — concorrência', () => {
+  it('5 remetentes transferindo pro MESMO destinatário simultaneamente: nenhum perde', async () => {
+    const senders = [301, 302, 303, 304, 305];
+    const TARGET = 999;
+    const amount = 100;
+
+    const h = makeHarness({
+      gold: {
+        ...Object.fromEntries(senders.map((id) => [id, 1000])),
+        [TARGET]: 0
+      }
+    });
+    const dependencies = { db: h.makeConcurrentDb() };
+
+    const results = await Promise.all(
+      senders.map((senderId, i) => economy.transfer({
+        from: { type: 'character', ref: senderId },
+        to: { type: 'character', ref: TARGET },
+        amount,
+        reason: 'gift',
+        module: 'test',
+        idempotencyKey: `concurrent-to-target-${i}`
+      }, dependencies))
+    );
+
+    assert.ok(results.every((r) => r.ok === true), `todas as 5 deveriam ter sucesso: ${JSON.stringify(results)}`);
+
+    assert.strictEqual(h.state.gold[TARGET], senders.length * amount,
+      'o alvo precisa ter recebido a soma exata das 5 transferências — nenhuma perna pode se perder na interleaving');
+
+    for (const senderId of senders) {
+      assert.strictEqual(h.state.gold[senderId], 1000 - amount);
+    }
+
+    assert.strictEqual(h.state.ledger.length, senders.length * 2, '2 pernas por transferência, nenhuma faltando');
+    const transferIds = new Set(h.state.ledger.map((l) => l.transferId));
+    assert.strictEqual(transferIds.size, senders.length, 'cada transferência precisa de um transfer_id distinto — sem colisão sob concorrência');
+  });
+
+  it('o MESMO remetente não consegue gastar o mesmo saldo duas vezes em transferências concorrentes (duplicação)', async () => {
+    const SENDER = 401;
+    const TARGET_1 = 501;
+    const TARGET_2 = 502;
+
+    // Saldo alcança para UMA transferência de 700, não para as duas.
+    const h = makeHarness({ gold: { [SENDER]: 700, [TARGET_1]: 0, [TARGET_2]: 0 } });
+    const dependencies = { db: h.makeConcurrentDb() };
+
+    const [resultA, resultB] = await Promise.all([
+      economy.transfer({
+        from: { type: 'character', ref: SENDER }, to: { type: 'character', ref: TARGET_1 },
+        amount: 700, reason: 'race_a', module: 'test', idempotencyKey: 'concurrent-race-a'
+      }, dependencies),
+      economy.transfer({
+        from: { type: 'character', ref: SENDER }, to: { type: 'character', ref: TARGET_2 },
+        amount: 700, reason: 'race_b', module: 'test', idempotencyKey: 'concurrent-race-b'
+      }, dependencies)
+    ]);
+
+    const outcomes = [resultA, resultB];
+    const sucessos = outcomes.filter((r) => r.ok);
+    const recusas = outcomes.filter((r) => !r.ok);
+
+    assert.strictEqual(sucessos.length, 1, `exatamente uma das duas deveria ter passado: ${JSON.stringify(outcomes)}`);
+    assert.strictEqual(recusas.length, 1);
+    assert.strictEqual(recusas[0].code, 'insufficient_funds');
+
+    // O saldo do remetente nunca pode ficar negativo — duplicar 700 a partir
+    // de 700 e sair com -700 seria o exploit de duplicação que a Tarefa 7
+    // existe para impedir.
+    assert.strictEqual(h.state.gold[SENDER], 0);
+    assert.ok(h.state.gold[SENDER] >= 0, 'saldo nunca pode ficar negativo sob corrida');
   });
 });

@@ -54,7 +54,9 @@ const SPEC = {
   'economy.startingGold': { ...num(0, 1000000), default: 0, usedBy: 'whitelist.js (ouro inicial do personagem)' },
 
   'profession.maxPerCharacter': { ...num(1, 20), default: 3, usedBy: 'profession-service.js (grantProfession/reactivateProfession)' },
-  'profession.maxRank': { ...num(0, 20), default: 3, usedBy: 'profession-service.js (setProfessionRank)' }
+  'profession.maxRank': { ...num(0, 20), default: 3, usedBy: 'profession-service.js (setProfessionRank)' },
+
+  'economy.largeTransactionThreshold': { ...num(1, 2147483647), default: 5000, usedBy: 'core/economy-service.js (_auditLargeTransfer)' }
 };
 
 /**

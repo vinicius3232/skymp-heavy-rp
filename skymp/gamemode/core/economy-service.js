@@ -40,6 +40,7 @@
 const crypto = require('crypto');
 const database = require('../database');
 const transactionService = require('./transaction-service');
+const serverOptions = require('./server-options');
 
 const MODULE_DEFAULT = 'economy';
 
@@ -268,6 +269,49 @@ async function _recordLegs(conn, params, dependencies) {
 }
 
 /**
+ * Registra uma transferência grande em `audit_logs` — o mesmo lugar que
+ * `admin-service.auditLog` escreve, para a staff olhar dinheiro e ações de
+ * staff no mesmo lugar. Não cria tabela nova: `gold_transactions` já tem a
+ * história completa (Achado 1), o que faltava era marcar o que passa de um
+ * limiar configurável (`economy.largeTransactionThreshold`) num lugar que já
+ * é rotina de auditoria olhar, sem precisar somar o ledger toda vez.
+ *
+ * Escreve na MESMA `conn`/transação do movimento — atômico com o ledger, sem
+ * janela entre "moveu dinheiro" e "registrou que moveu muito dinheiro". Mas o
+ * `INSERT` em si nunca propaga erro: uma falha aqui não pode reverter uma
+ * transferência de dinheiro válida, mesma filosofia de `_applyToClient` em
+ * `transaction-service.js` ("BD já está correto, o resto é melhor-esforço").
+ *
+ * @param {object} conn conexão com transação ativa
+ * @param {object} params
+ * @param {object} [dependencies]
+ */
+async function _auditLargeTransfer(conn, params, dependencies = {}) {
+  const so = dependencies.serverOptions || serverOptions;
+  const logger = dependencies.logger || console;
+  const threshold = so.get('economy.largeTransactionThreshold');
+  if (params.amount < threshold) return;
+
+  try {
+    await conn.query(
+      'INSERT INTO audit_logs (action, actor_account_id, target_account_id, details) VALUES (?, ?, ?, ?)',
+      [
+        'economy:large_transfer',
+        null,
+        null,
+        JSON.stringify({
+          from: params.from, to: params.to, amount: params.amount,
+          transferId: params.transferId, reason: params.reason,
+          module: params.module, actorCharacterId: params.actorCharacterId || null
+        })
+      ]
+    );
+  } catch (err) {
+    logger.error(`[economy] Falha ao gravar audit_logs para transferência grande ${params.transferId} (transferência já aplicada, só a auditoria falhou): ${err.message}`);
+  }
+}
+
+/**
  * Procura um movimento já gravado com esta chave, **dentro** da transação.
  *
  * Achado 6: as funções públicas do transaction-service consultam a
@@ -362,6 +406,11 @@ async function transferInTransaction(conn, request, dependencies = {}) {
   await _recordLegs(conn, {
     from, to, amount, transferId, idempotencyKey,
     reason,
+    module: request.module || MODULE_DEFAULT,
+    actorCharacterId: request.actorCharacterId
+  }, dependencies);
+  await _auditLargeTransfer(conn, {
+    from, to, amount, transferId, reason,
     module: request.module || MODULE_DEFAULT,
     actorCharacterId: request.actorCharacterId
   }, dependencies);

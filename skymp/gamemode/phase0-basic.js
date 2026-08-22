@@ -62,6 +62,8 @@ const marketStalls  = require(path.join(gamemodeDir, 'market-stalls-service'));
 const playerPanel   = require(path.join(gamemodeDir, 'player-panel-service'));
 const deathService  = require(path.join(gamemodeDir, 'death-service'));
 const professionService = require(path.join(gamemodeDir, 'profession-service'));
+const environmentService = require(path.join(gamemodeDir, 'environment-service'));
+const economyPhysicalSync = require(path.join(gamemodeDir, 'core', 'economy-physical-sync'));
 const voipService   = require(path.join(gamemodeDir, 'voip-service'));
 const voiceEndpoint = require(path.join(gamemodeDir, 'core', 'voice', 'voice-endpoint'));
 const soulService   = require(path.join(gamemodeDir, 'soul-service'));
@@ -227,6 +229,41 @@ moduleRegistry.register({
   dependencies: [],
   commands: professionService.commandDefs(),
   initialize: async () => {}
+});
+
+// LAB: Time Sync — relógio autoritativo do servidor (GameTime/TimeScale),
+// heartbeat de correção de deriva, persistência entre restarts. Sem clima —
+// ver docs/technical/ENVIRONMENT_WEATHER_SPIKE.md e o cabeçalho de
+// environment-service.js.
+moduleRegistry.register({
+  id: 'environment',
+  enabledBy: 'ENABLE_ENVIRONMENT_SERVICE',
+  phase: 'lab',
+  version: '1.0.0',
+  dependencies: [],
+  commands: environmentService.commandDefs(),
+  initialize: async () => {
+    await environmentService.initialize();
+  },
+  shutdown: async () => {
+    await environmentService.shutdown();
+  },
+  healthCheck: () => environmentService.healthCheck()
+});
+
+// LAB: Anti-cheat de ouro físico — Gold001 nunca deveria existir no
+// inventário (ouro deste projeto é 100% virtual, ver core/economy-service.js
+// e core/economy-physical-sync.js). Detecta e remove no login; nunca mexe em
+// characters.gold.
+moduleRegistry.register({
+  id: 'economy-physical-sync',
+  enabledBy: 'ENABLE_ECONOMY_PHYSICAL_SYNC',
+  phase: 'lab',
+  version: '1.0.0',
+  dependencies: [],
+  commands: [],
+  initialize: async () => {},
+  healthCheck: () => economyPhysicalSync.healthCheck()
 });
 
 moduleRegistry.register({
