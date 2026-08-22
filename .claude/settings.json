@@ -1,0 +1,19 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"$CLAUDE_PROJECT_DIR/skymp/gamemode/scripts/check-test-registry.js\" --hook"
+          },
+          {
+            "type": "command",
+            "command": "node \"$CLAUDE_PROJECT_DIR/skymp/gamemode/scripts/check-write-guards.js\" --hook"
+          }
+        ]
+      }
+    ]
+  }
+}
