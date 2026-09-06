@@ -29,7 +29,14 @@ Built for *strict roleplay*: server authority over economy, identity and consequ
 
 **Language note:** entry-point documents (this README, contributing and security guides) are maintained in Portuguese, English, Russian and Spanish. The remaining technical documentation is **Portuguese only** — see [Documentation language](#documentation-language) below.
 
+
+### Quick Tips for Newcomers
+- Start with the [QA Report](docs/technical/QA_REPORT_2026-08.md) to know what is actually working.
+- Read [CONTRIBUTING.en.md](CONTRIBUTING.en.md) before opening any pull request.
+- Most deep technical docs are in Portuguese — use a translator if needed, or ask in Discussions.
+- This project is still in laboratory stage — do not expect a playable public server yet.
 ---
+
 
 ## What's in the box
 
